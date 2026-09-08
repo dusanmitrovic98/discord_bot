@@ -1,0 +1,17 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Environment & Secrets
+.env
+*.pem
+*.key
+private_key.txt
+
+# OS & Editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

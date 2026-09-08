@@ -1,0 +1,74 @@
+[package]
+name = "discord-bot"
+version = "0.1.0"
+edition = "2021"
+authors = ["The Architect", "Gaia"]
+
+[dependencies]
+# Concurrency & Async
+tokio = { version = "1.39", features = ["full"] }
+futures = "0.3"
+
+# Discord Gateway
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "cache"] }
+
+# Database & Storage (mongodb 3.x uses Tokio by default)
+mongodb = "3.1"
+bson = { version = "2.11", features = ["chrono-0_4"] }
+
+# Security & Hashing
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+
+# Image Processing (Stripped to minimal decoders for 512MB RAM constraint)
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+# Text Normalization & Anti-Evasion
+deunicode = "1.6"
+regex = "1.10"
+
+# Networking & HTTP Client
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+
+# WASM Sandboxed Plugin Engine
+wasmtime = "24.0"
+
+# Compression & Memory Systems
+zstd = "0.13"
+libc = "0.2"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.12"
+wat = "1.0"
+
+[lib]
+name = "aegis_bastion"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sentry_runner"
+path = "src/bin/sentry_runner.rs"
+
+[[bin]]
+name = "bot_core"
+path = "src/bin/bot_core.rs"
+
+[[bin]]
+name = "titan_cli"
+path = "src/bin/titan_cli.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
