@@ -55,8 +55,6 @@ async fn main() {
 
     // 6. Initialize Resilient Classifier Client & Bounded Queue
     let classifier_client = Arc::new(ResilientClassifierClient::new(classifier_url));
-    // Spawn background keep-alive pinger for Render free-tier
-    classifier_client.clone().spawn_keep_alive();
 
     // Bounded MPSC Queue: Capacity 500, sequential processing (NASA Rule 2)
     let scan_queue = Arc::new(BoundedScanQueue::new(500, classifier_client));

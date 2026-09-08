@@ -93,21 +93,6 @@ impl ResilientClassifierClient {
             backoff *= 2; // Exponential backoff
         }
     }
-
-    /// Background Keep-Alive pinger to mitigate Render's 15-minute sleep state.
-    pub fn spawn_keep_alive(self: Arc<Self>) {
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_secs(600)).await; // Every 10 minutes
-                let _ = self
-                    .client
-                    .get(&self.endpoint.replace("/api/classify", "/"))
-                    .send()
-                    .await;
-                info!("Dispatched keep-alive ping to SFW Classifier on Render");
-            }
-        });
-    }
 }
 
 /// Bounded MPSC Queue to enforce sequential execution and protect the 512MB RAM single core on Render.
