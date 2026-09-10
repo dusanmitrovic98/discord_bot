@@ -17,7 +17,9 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use aegis_bastion::crypto::CryptoEngine;
-use aegis_bastion::db::{AdminUser, DatabaseEngine, DynamicRule};
+use aegis_bastion::db::{
+    AdminUser, DatabaseEngine, DynamicRule, WhitelistedImage, WhitelistedUser,
+};
 use aegis_bastion::supervisor::SupervisorWatchdog;
 
 const ARCHITECT_PUBLIC_KEY: [u8; 32] = [
@@ -56,13 +58,10 @@ async fn main() {
         reload_notifier: reload_notifier.clone(),
     };
 
-    // =========================================================================
-    // AXUM ROUTER: Root is plain "OK", Dashboard hidden at /dashboard
-    // =========================================================================
     let app = Router::new()
-        .route("/", get(health_check)) // Plain "OK" for camouflage & pings
-        .route("/health", get(health_check)) // Plain "OK"
-        .route("/dashboard", get(serve_dashboard)) // Protected Flat UI Console
+        .route("/", get(health_check))
+        .route("/health", get(health_check))
+        .route("/dashboard", get(serve_dashboard))
         .route("/update", get(handle_update_get).post(handle_update_post))
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/submit", post(auth_submit))
@@ -73,7 +72,20 @@ async fn main() {
         )
         .route("/api/images", get(list_images).delete(revoke_image))
         .route("/api/images/blacklist", post(blacklist_image))
+        .route(
+            "/api/whitelist/users",
+            get(list_whitelisted_users)
+                .post(add_whitelisted_user)
+                .delete(delete_whitelisted_user),
+        )
+        .route(
+            "/api/whitelist/images",
+            get(list_whitelisted_images)
+                .post(add_whitelisted_image)
+                .delete(delete_whitelisted_image),
+        )
         .route("/api/audits", get(list_audits))
+        .route("/api/audits/whitelist-pfp", post(one_click_whitelist_image))
         .route("/api/users", get(list_users).post(create_moderator))
         .with_state(state);
 
@@ -90,9 +102,6 @@ async fn main() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    // =========================================================================
-    // IN-MEMORY EXECUTION & WATCHDOG
-    // =========================================================================
     let mut watchdog = SupervisorWatchdog::new();
     sync_and_swap(&db_arc, &mut watchdog).await;
 
@@ -122,9 +131,8 @@ async fn handle_update_post(State(state): State<AppState>) -> &'static str {
 }
 
 // =============================================================================
-// AUTHENTICATION & RBAC (Argon2id + First-User Bootstrap)
+// AUTHENTICATION & RBAC
 // =============================================================================
-
 #[derive(Serialize)]
 struct AuthStatusResponse {
     has_admin: bool,
@@ -150,7 +158,6 @@ async fn auth_status(
 ) -> Json<AuthStatusResponse> {
     let count = state.db.get_admin_user_count().await.unwrap_or(0);
     let has_admin = count > 0;
-
     let mut authenticated = false;
     let mut user = None;
 
@@ -167,7 +174,6 @@ async fn auth_status(
             }
         }
     }
-
     Json(AuthStatusResponse {
         has_admin,
         authenticated,
@@ -179,27 +185,23 @@ async fn auth_submit(State(state): State<AppState>, Json(payload): Json<AuthPayl
     let count = state.db.get_admin_user_count().await.unwrap_or(0);
 
     if count == 0 {
-        // Bootstrap: First user becomes Master Admin
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
         let password_hash = argon2
             .hash_password(payload.password.as_bytes(), &salt)
             .unwrap()
             .to_string();
-
         let admin = AdminUser {
             username: payload.username.clone(),
             password_hash,
             role: "admin".to_string(),
             created_at: mongodb::bson::DateTime::now(),
         };
-
         let _ = state.db.create_admin_user(admin).await;
         info!("👑 Master Admin account initialized: {}", payload.username);
         return create_auth_cookie(&payload.username);
     }
 
-    // Standard Login
     if let Ok(Some(user)) = state.db.fetch_user(&payload.username).await {
         let parsed_hash = PasswordHash::new(&user.password_hash).unwrap();
         if Argon2::default()
@@ -210,7 +212,6 @@ async fn auth_submit(State(state): State<AppState>, Json(payload): Json<AuthPayl
             return create_auth_cookie(&payload.username);
         }
     }
-
     (StatusCode::UNAUTHORIZED, "Invalid credentials").into_response()
 }
 
@@ -238,16 +239,120 @@ fn parse_session_cookie(cookie_str: &str) -> Option<String> {
 }
 
 // =============================================================================
-// THREAT STUDIO (DYNAMIC REGEXES)
+// WHITELIST ENDPOINTS & 1-CLICK UNBLOCK
 // =============================================================================
+#[derive(Deserialize)]
+struct AddWlUserPayload {
+    identifier: String,
+    reason: String,
+}
 
+#[derive(Deserialize)]
+struct QueryIdentifier {
+    identifier: String,
+}
+
+async fn list_whitelisted_users(State(state): State<AppState>) -> Json<Vec<WhitelistedUser>> {
+    let users = state.db.fetch_whitelisted_users().await.unwrap_or_default();
+    Json(users)
+}
+
+async fn add_whitelisted_user(
+    State(state): State<AppState>,
+    Json(payload): Json<AddWlUserPayload>,
+) -> Response {
+    let _ = state
+        .db
+        .add_whitelisted_user(&payload.identifier, "Console", &payload.reason)
+        .await;
+    state.reload_notifier.notify_one();
+    StatusCode::CREATED.into_response()
+}
+
+async fn delete_whitelisted_user(
+    State(state): State<AppState>,
+    Query(q): Query<QueryIdentifier>,
+) -> Response {
+    let _ = state.db.remove_whitelisted_user(&q.identifier).await;
+    state.reload_notifier.notify_one();
+    StatusCode::OK.into_response()
+}
+
+#[derive(Deserialize)]
+struct AddWlImagePayload {
+    url: String,
+    label: String,
+}
+
+async fn list_whitelisted_images(State(state): State<AppState>) -> Json<Vec<WhitelistedImage>> {
+    let images = state
+        .db
+        .fetch_whitelisted_images()
+        .await
+        .unwrap_or_default();
+    Json(images)
+}
+
+async fn add_whitelisted_image(
+    State(state): State<AppState>,
+    Json(payload): Json<AddWlImagePayload>,
+) -> Response {
+    let client = reqwest::Client::new();
+    if let Ok(resp) = client.get(&payload.url).send().await {
+        if let Ok(bytes) = resp.bytes().await {
+            let sha256 = CryptoEngine::sha256(&bytes);
+            let _ = state
+                .db
+                .add_whitelisted_image(&sha256, &payload.label, "Console")
+                .await;
+            state.reload_notifier.notify_one();
+            return StatusCode::CREATED.into_response();
+        }
+    }
+    (StatusCode::BAD_REQUEST, "Failed fetching image").into_response()
+}
+
+#[derive(Deserialize)]
+struct QuerySha {
+    sha256: String,
+}
+
+async fn delete_whitelisted_image(
+    State(state): State<AppState>,
+    Query(q): Query<QuerySha>,
+) -> Response {
+    let _ = state.db.remove_whitelisted_image(&q.sha256).await;
+    state.reload_notifier.notify_one();
+    StatusCode::OK.into_response()
+}
+
+#[derive(Deserialize)]
+struct OneClickWhitelistPayload {
+    sha256: String,
+    label: String,
+}
+
+async fn one_click_whitelist_image(
+    State(state): State<AppState>,
+    Json(payload): Json<OneClickWhitelistPayload>,
+) -> Response {
+    let _ = state
+        .db
+        .add_whitelisted_image(&payload.sha256, &payload.label, "Console 1-Click")
+        .await;
+    state.reload_notifier.notify_one();
+    StatusCode::OK.into_response()
+}
+
+// =============================================================================
+// THREAT STUDIO, IMAGE BLACKLIST, AUDITS & USERS
+// =============================================================================
 #[derive(Deserialize)]
 struct AddRulePayload {
     pattern: String,
     description: String,
     action: String,
 }
-
 #[derive(Deserialize)]
 struct QueryPattern {
     pattern: String,
@@ -259,7 +364,6 @@ async fn list_rules(State(state): State<AppState>) -> Json<Vec<DynamicRule>> {
 }
 
 async fn add_rule(State(state): State<AppState>, Json(payload): Json<AddRulePayload>) -> Response {
-    // NASA Rule 5: Test-compile regex on input before storing!
     if let Err(e) = regex::Regex::new(&payload.pattern) {
         return (
             StatusCode::BAD_REQUEST,
@@ -267,7 +371,6 @@ async fn add_rule(State(state): State<AppState>, Json(payload): Json<AddRulePayl
         )
             .into_response();
     }
-
     let rule = DynamicRule {
         pattern: payload.pattern,
         description: payload.description,
@@ -276,29 +379,21 @@ async fn add_rule(State(state): State<AppState>, Json(payload): Json<AddRulePayl
         added_by: "Console".to_string(),
         created_at: mongodb::bson::DateTime::now(),
     };
-
     let _ = state.db.add_dynamic_rule(rule).await;
+    state.reload_notifier.notify_one();
     (StatusCode::CREATED, "Rule added").into_response()
 }
 
 async fn delete_rule(State(state): State<AppState>, Query(q): Query<QueryPattern>) -> Response {
     let _ = state.db.delete_dynamic_rule(&q.pattern).await;
+    state.reload_notifier.notify_one();
     StatusCode::OK.into_response()
 }
-
-// =============================================================================
-// IMAGE BLACKLIST (LOGO ANNIHILATOR - SHA256 & dHash)
-// =============================================================================
 
 #[derive(Deserialize)]
 struct BlacklistImagePayload {
     url: String,
     label: String,
-}
-
-#[derive(Deserialize)]
-struct QuerySha {
-    sha256: String,
 }
 
 async fn list_images(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
@@ -323,15 +418,10 @@ async fn blacklist_image(
         if let Ok(bytes) = resp.bytes().await {
             let sha256 = CryptoEngine::sha256(&bytes);
             let dhash = CryptoEngine::compute_dhash(&bytes).unwrap_or(0);
-
             let _ = state
                 .db
                 .blacklist_image_explicit(&sha256, dhash, &payload.label, "Console")
                 .await;
-            info!(
-                "🖼️ Image Blacklisted via Console: '{}' (SHA: {}, dHash: {:016x})",
-                payload.label, sha256, dhash
-            );
             return StatusCode::CREATED.into_response();
         }
     }
@@ -342,10 +432,6 @@ async fn revoke_image(State(state): State<AppState>, Query(q): Query<QuerySha>) 
     let _ = state.db.revoke_blacklisted_image(&q.sha256).await;
     StatusCode::OK.into_response()
 }
-
-// =============================================================================
-// AUDITS & MODERATOR USER MANAGEMENT
-// =============================================================================
 
 async fn list_audits(State(state): State<AppState>) -> Json<Vec<aegis_bastion::db::AuditLogEntry>> {
     let audits = state.db.fetch_recent_audits(50).await.unwrap_or_default();
@@ -380,14 +466,12 @@ async fn create_moderator(
         .hash_password(payload.password.as_bytes(), &salt)
         .unwrap()
         .to_string();
-
     let mod_user = AdminUser {
         username: payload.username,
         password_hash,
         role: "moderator".to_string(),
         created_at: mongodb::bson::DateTime::now(),
     };
-
     let _ = state.db.create_admin_user(mod_user).await;
     StatusCode::CREATED.into_response()
 }
@@ -398,7 +482,6 @@ async fn sync_and_swap(db: &DatabaseEngine, watchdog: &mut SupervisorWatchdog) {
             let compressed_bytes = blob_doc.compressed_binary.bytes;
             let signature_bytes: [u8; 64] =
                 blob_doc.signature.bytes.try_into().unwrap_or([0u8; 64]);
-
             if let Err(e) = CryptoEngine::verify_signature(
                 &ARCHITECT_PUBLIC_KEY,
                 &compressed_bytes,
@@ -407,13 +490,8 @@ async fn sync_and_swap(db: &DatabaseEngine, watchdog: &mut SupervisorWatchdog) {
                 error!("SECURITY ALERT: Core Blob signature is invalid: {}", e);
             } else {
                 info!("Ed25519 Signature Verified. Decompressing Zstd binary...");
-                match zstd::decode_all(&compressed_bytes[..]) {
-                    Ok(decompressed_binary) => {
-                        if let Err(e) = watchdog.hot_swap_core(decompressed_binary) {
-                            error!("Failed hot-swapping core binary: {}", e);
-                        }
-                    }
-                    Err(e) => error!("Zstd decompression failed: {}", e),
+                if let Ok(decompressed_binary) = zstd::decode_all(&compressed_bytes[..]) {
+                    let _ = watchdog.hot_swap_core(decompressed_binary);
                 }
             }
         }
