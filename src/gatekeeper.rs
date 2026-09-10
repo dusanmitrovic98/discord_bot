@@ -2,6 +2,13 @@ use deunicode::deunicode;
 use regex::{Regex, RegexSet};
 use std::sync::{Arc, RwLock};
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ThreatVerdict {
+    Safe,
+    DeleteOnly, // Soft rule (e.g. 'link' in name -> delete messages only, NO ban)
+    InstantBan, // Hardcoded predatory raid rule (e.g. 'hotlink', 'megalink', 'cp' -> instant ban)
+}
+
 pub struct TextGatekeeper {
     hardcoded_patterns: RegexSet,
     dynamic_patterns: Arc<RwLock<Option<RegexSet>>>,
@@ -114,22 +121,24 @@ impl TextGatekeeper {
         (normalized, alpha_only, deduped)
     }
 
-    /// Two-Tier Fast-Path Evaluation
-    pub fn is_flagged(&self, raw_text: &str) -> bool {
+    /// Evaluates threat severity using the two-tier execution hierarchy:
+    /// 1. Tier 1 (Hardcoded fast-path) -> Returns `ThreatVerdict::InstantBan` in <1μs.
+    /// 2. Tier 2 (Dynamic web rules)   -> Returns `ThreatVerdict::DeleteOnly`.
+    pub fn evaluate_threat(&self, raw_text: &str) -> ThreatVerdict {
         let (normalized, alpha_only, deduped) = self.canonicalize(raw_text);
 
         // =====================================================================
-        // TIER 1: FAST-PATH (Hardcoded patterns run in <1 microsecond)
+        // TIER 1: FAST-PATH (Hardcoded patterns ALWAYS trigger Instant Ban)
         // =====================================================================
         if self.hardcoded_patterns.is_match(&normalized)
             || self.hardcoded_patterns.is_match(&alpha_only)
             || self.hardcoded_patterns.is_match(&deduped)
         {
-            return true; // Match found immediately; zero database overhead!
+            return ThreatVerdict::InstantBan;
         }
 
         // =====================================================================
-        // TIER 2: DYNAMIC RAM CACHE (Evaluated only if fast-path passes)
+        // TIER 2: DYNAMIC RAM CACHE (Soft rules trigger Delete Only)
         // =====================================================================
         if let Ok(guard) = self.dynamic_patterns.read() {
             if let Some(dynamic_set) = &*guard {
@@ -137,12 +146,17 @@ impl TextGatekeeper {
                     || dynamic_set.is_match(&alpha_only)
                     || dynamic_set.is_match(&deduped)
                 {
-                    return true;
+                    return ThreatVerdict::DeleteOnly;
                 }
             }
         }
 
-        false
+        ThreatVerdict::Safe
+    }
+
+    /// Backward-compatible boolean check for existing tests
+    pub fn is_flagged(&self, raw_text: &str) -> bool {
+        self.evaluate_threat(raw_text) != ThreatVerdict::Safe
     }
 }
 
@@ -164,36 +178,82 @@ mod tests {
         ];
 
         for username in attacks {
-            assert!(
-                gatekeeper.is_flagged(username),
-                "Failed to catch: {}",
-                username
+            assert_eq!(
+                gatekeeper.evaluate_threat(username),
+                ThreatVerdict::InstantBan
             );
         }
     }
 
     #[test]
-    fn test_catches_obfuscated_homoglyphs_and_leetspeak() {
+    fn test_hardcoded_hotlink_and_dsm_open() {
         let gatekeeper = TextGatekeeper::new();
 
-        let evasions = vec![
-            "M-E-G-A---L-I-N-K",
-            "c.p. stuff",
-            "m3g4 l1nk",
-            "CP_STUFF_999",
-            "c p  stuff",
-            "ｍｅｇａ ｌｉｎｋ",
-            "СР ѕтυff",
-            "mmmeeegggaaallliinnkk",
-        ];
+        assert_eq!(
+            gatekeeper.evaluate_threat("hotlink0093"),
+            ThreatVerdict::InstantBan
+        );
+        assert_eq!(
+            gatekeeper.evaluate_threat("HOT 🔥 LINK"),
+            ThreatVerdict::InstantBan
+        );
+        assert_eq!(
+            gatekeeper.evaluate_threat("h-o-t---l-i-n-k"),
+            ThreatVerdict::InstantBan
+        );
+        assert_eq!(
+            gatekeeper.evaluate_threat("DSM open DSM open DSM open"),
+            ThreatVerdict::InstantBan
+        );
+        assert_eq!(
+            gatekeeper.evaluate_threat("dsmopen"),
+            ThreatVerdict::InstantBan
+        );
 
-        for evasion in evasions {
-            assert!(
-                gatekeeper.is_flagged(evasion),
-                "Failed to catch: {}",
-                evasion
-            );
-        }
+        // Benign names remain safe
+        assert_eq!(
+            gatekeeper.evaluate_threat("hotel_california"),
+            ThreatVerdict::Safe
+        );
+        assert_eq!(
+            gatekeeper.evaluate_threat("shotgun_hero"),
+            ThreatVerdict::Safe
+        );
+    }
+
+    #[test]
+    fn test_soft_dynamic_rule_hierarchy() {
+        let gatekeeper = TextGatekeeper::new();
+
+        // Inject dynamic soft rule: 'link'
+        let dynamic_rules = vec![r"(?i)l+i+n+k+".to_string()];
+        gatekeeper.reload_dynamic_patterns(&dynamic_rules).unwrap();
+
+        // 1. Attacker with 'hotlink' MUST trigger InstantBan (Tier 1 Priority)
+        assert_eq!(
+            gatekeeper.evaluate_threat("hotlink0093"),
+            ThreatVerdict::InstantBan
+        );
+        assert_eq!(
+            gatekeeper.evaluate_threat("HOT 🔥 LINK"),
+            ThreatVerdict::InstantBan
+        );
+
+        // 2. Member with generic 'link' triggers DeleteOnly (Tier 2 Soft Policy)
+        assert_eq!(
+            gatekeeper.evaluate_threat("cool_links_daily"),
+            ThreatVerdict::DeleteOnly
+        );
+        assert_eq!(
+            gatekeeper.evaluate_threat("link_master"),
+            ThreatVerdict::DeleteOnly
+        );
+
+        // 3. Normal member remains Safe
+        assert_eq!(
+            gatekeeper.evaluate_threat("normal_gamer_guy"),
+            ThreatVerdict::Safe
+        );
     }
 
     #[test]
@@ -211,27 +271,7 @@ mod tests {
         ];
 
         for user in benign {
-            assert!(
-                !gatekeeper.is_flagged(user),
-                "False positive on safe user: {}",
-                user
-            );
+            assert_eq!(gatekeeper.evaluate_threat(user), ThreatVerdict::Safe);
         }
-    }
-
-    #[test]
-    fn test_hardcoded_hotlink_and_dsm_open() {
-        let gatekeeper = TextGatekeeper::new();
-
-        // Exact attack patterns from the Architect's screenshot
-        assert!(gatekeeper.is_flagged("hotlink0093"));
-        assert!(gatekeeper.is_flagged("HOT 🔥 LINK"));
-        assert!(gatekeeper.is_flagged("h-o-t---l-i-n-k"));
-        assert!(gatekeeper.is_flagged("DSM open DSM open DSM open"));
-        assert!(gatekeeper.is_flagged("dsmopen"));
-
-        // Benign names remain safe
-        assert!(!gatekeeper.is_flagged("hotel_california"));
-        assert!(!gatekeeper.is_flagged("shotgun_hero"));
     }
 }

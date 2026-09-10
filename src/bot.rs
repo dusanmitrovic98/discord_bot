@@ -1,26 +1,28 @@
 use serenity::async_trait;
-use serenity::builder::{CreateAttachment, CreateEmbed, CreateMessage};
+use serenity::builder::{CreateAttachment, CreateEmbed, CreateMessage, GetMessages};
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::model::guild::{Guild, Member};
 use serenity::model::id::{ChannelId, GuildId, UserId};
 use serenity::prelude::*;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::crypto::CryptoEngine;
 use crate::db::{AuditLogEntry, DatabaseEngine};
-use crate::gatekeeper::TextGatekeeper;
+use crate::gatekeeper::{TextGatekeeper, ThreatVerdict};
 use crate::plugin_engine::DynamicPluginEngine;
 use crate::queue::{BoundedScanQueue, ScanTask};
 use crate::Result;
 
 // =========================================================================
-// AUTHORIZED BOUNDARY CONSTANTS
+// BOUNDARY & TARGET CONSTANTS
 // =========================================================================
-const AUTHORIZED_GUILD_ID: u64 = 1385636051330142369; // Strictly "The Chill Zone"
+const AUTHORIZED_GUILD_ID: u64 = 1385636051330142369; // "The Chill Zone"
+const WELCOME_CHANNEL_ID: u64 = 1385636052374520014; // Welcome Channel
 const MOD_CHANNEL_ID: u64 = 1424824152417767628; // Clean text alerts (Moderators)
-const LOGS_CHANNEL_ID: u64 = 1492554211118809319; // Verbose evidence logs with images (Architect)
+const LOGS_CHANNEL_ID: u64 = 1492554211118809319; // Evidence logs with image files (Architect)
 const OWNER_USER_ID: u64 = 1015600709724557434;
 
 // Classification Threshold on 0.0 - 100.0 scale
@@ -56,9 +58,8 @@ impl EventHandler for Handler {
         }
     }
 
-    /// On Member Join: Strictly enforced on AUTHORIZED_GUILD_ID
+    /// On Member Join: Evaluates joining member; bans hardcoded predators and purges Sapphire welcome cards
     async fn guild_member_addition(&self, ctx: Context, member: Member) {
-        // Enforce Server Whitelist
         if member.guild_id.get() != AUTHORIZED_GUILD_ID {
             return;
         }
@@ -77,34 +78,68 @@ impl EventHandler for Handler {
 
         info!("👤 [JOIN EVENT] Inspecting: {} (ID: {})", username, user_id);
 
-        // 1. Predatory Username Gatekeeper (ONLY trigger that issues a ban)
-        if container.gatekeeper.is_flagged(username)
-            || container.gatekeeper.is_flagged(&display_name)
-        {
-            warn!(
-                "🚨 [GATEKEEPER] PREDATORY USERNAME DETECTED: {} ({}). Eradicating account.",
-                username, user_id
-            );
-            execute_ban(
-                &ctx.http,
-                guild_id,
-                user_id,
-                "Zero-Tolerance Predatory Username Match",
-                1.0,
-                &container.db,
-            )
-            .await;
-            send_mod_alert(
-                &ctx,
-                "Predatory Username Banned",
-                &format!(
-                    "User <@{}> was banned for predatory username `{}`",
-                    user_id, username
-                ),
-                user_id,
-            )
-            .await;
-            return;
+        // 1. Two-Tier Threat Gatekeeper on Join Names
+        let verdict_user = container.gatekeeper.evaluate_threat(username);
+        let verdict_display = container.gatekeeper.evaluate_threat(&display_name);
+
+        let highest_verdict = match (verdict_user, verdict_display) {
+            (ThreatVerdict::InstantBan, _) | (_, ThreatVerdict::InstantBan) => {
+                ThreatVerdict::InstantBan
+            }
+            (ThreatVerdict::DeleteOnly, _) | (_, ThreatVerdict::DeleteOnly) => {
+                ThreatVerdict::DeleteOnly
+            }
+            _ => ThreatVerdict::Safe,
+        };
+
+        match highest_verdict {
+            ThreatVerdict::InstantBan => {
+                warn!(
+                    "🚨 [GATEKEEPER] PREDATORY USERNAME DETECTED: {} ({}). Eradicating account.",
+                    username, user_id
+                );
+
+                // Sweep Sapphire welcome card
+                tokio::spawn(purge_welcome_channel_on_nsfw_join(ctx.http.clone()));
+
+                execute_ban(
+                    &ctx.http,
+                    guild_id,
+                    user_id,
+                    "Zero-Tolerance Predatory Username Match",
+                    1.0,
+                    &container.db,
+                )
+                .await;
+                send_mod_alert(
+                    &ctx,
+                    "Predatory Username Banned",
+                    &format!(
+                        "User <@{}> was banned for predatory username `{}`",
+                        user_id, username
+                    ),
+                    user_id,
+                )
+                .await;
+                return;
+            }
+            ThreatVerdict::DeleteOnly => {
+                warn!(
+                    "⚠️ [SOFT NAME POLICY] User {} joined with soft-flagged name (contains restricted word). User NOT banned.",
+                    user_id
+                );
+                send_mod_alert(
+                    &ctx,
+                    "Soft Name Policy Notice",
+                    &format!(
+                        "User <@{}> joined with username `{}` matching a soft policy rule. No ban issued.",
+                        user_id, username
+                    ),
+                    user_id,
+                )
+                .await;
+            }
+            ThreatVerdict::Safe => {}
         }
 
         // 2. Avatar Scan on Join
@@ -116,12 +151,15 @@ impl EventHandler for Handler {
             if let Ok(bytes) = download_image(&container.http_client, &avatar_url).await {
                 let sha256 = CryptoEngine::sha256(&bytes);
 
-                // Check MongoDB Hash Cache
+                // Sub-millisecond Hash Cache Check from MongoDB Atlas
                 if let Ok(true) = container.db.is_image_blacklisted(&sha256).await {
                     warn!(
                         "🚨 [HASH CACHE] User {} joined with blacklisted NSFW avatar!",
                         user_id
                     );
+
+                    tokio::spawn(purge_welcome_channel_on_nsfw_join(ctx.http.clone()));
+
                     send_mod_alert(
                         &ctx,
                         "Known Adult/NSFW Avatar Detected",
@@ -160,6 +198,7 @@ impl EventHandler for Handler {
                     let ctx_clone = ctx.clone();
                     let db = container.db.clone();
                     let bytes_clone = bytes.clone();
+
                     tokio::spawn(async move {
                         if let Ok(Ok(resp)) = rx.await {
                             if resp.confidence.nsfw >= NSFW_AUTO_DELETE_THRESHOLD {
@@ -167,6 +206,11 @@ impl EventHandler for Handler {
                                     "🚨 [JOIN AVATAR NSFW] Flagged! Conf: {:.1}%",
                                     resp.confidence.nsfw
                                 );
+
+                                tokio::spawn(purge_welcome_channel_on_nsfw_join(
+                                    ctx_clone.http.clone(),
+                                ));
+
                                 let _ = db.record_banned_image(&sha256, 0, user_id).await;
                                 send_mod_alert(
                                     &ctx_clone,
@@ -194,14 +238,12 @@ impl EventHandler for Handler {
         }
     }
 
-    /// On Message: Strictly enforced on AUTHORIZED_GUILD_ID
+    /// On Message: Evaluates diagnostics, author names, author PFPs, attachments, and embeds
     async fn message(&self, ctx: Context, msg: Message) {
-        // 1. Prevent bot from responding to its own messages
         if msg.author.id == ctx.cache.current_user().id {
             return;
         }
 
-        // 2. Strict Boundary Enforcement: Ignore DMs and unauthorized servers
         if msg.guild_id != Some(GuildId::new(AUTHORIZED_GUILD_ID)) {
             return;
         }
@@ -217,11 +259,18 @@ impl EventHandler for Handler {
         let channel_id = msg.channel_id;
 
         // =========================================================================
-        // LAB DIAGNOSTIC: $test-name <text> (Safe testing: no bans)
+        // LAB DIAGNOSTIC: $test-name <text> (Safe testing: displays exact verdict)
         // =========================================================================
         if let Some(target_text) = msg.content.strip_prefix("$test-name ") {
-            let is_flagged = container.gatekeeper.is_flagged(target_text);
+            let verdict = container.gatekeeper.evaluate_threat(target_text);
             let (norm, alpha, deduped) = container.gatekeeper.canonicalize(target_text);
+
+            let verdict_str = match verdict {
+                ThreatVerdict::InstantBan => "🚨 **FLAGGED (Instant Ban - Predator / Hardcoded)**",
+                ThreatVerdict::DeleteOnly => "⚠️ **SOFT FLAGGED (Delete Message Only - No Ban)**",
+                ThreatVerdict::Safe => "✅ **SAFE (Clean Pass)**",
+            };
+
             let response = format!(
                 "🧪 **Gatekeeper Lab Test**\n\
                 > **Input Text:** `{}`\n\
@@ -229,22 +278,14 @@ impl EventHandler for Handler {
                 > **Normalized Form:** `{}`\n\
                 > **Alphanumeric Projection:** `{}`\n\
                 > **Deduplicated Projection:** `{}`",
-                target_text,
-                if is_flagged {
-                    "🚨 **FLAGGED (Would Trigger Instant Ban)**"
-                } else {
-                    "✅ **SAFE (Clean Pass)**"
-                },
-                norm,
-                alpha,
-                deduped
+                target_text, verdict_str, norm, alpha, deduped
             );
             let _ = msg.channel_id.say(&ctx.http, response).await;
             return;
         }
 
         // =========================================================================
-        // LAB DIAGNOSTIC: $test-pfp [@user or attachment] (Safe classifier test)
+        // LAB DIAGNOSTIC: $test-pfp [@user or attachment]
         // =========================================================================
         if msg.content.starts_with("$test-pfp") {
             let target_avatar = if let Some(user) = msg.mentions.first() {
@@ -325,7 +366,9 @@ impl EventHandler for Handler {
             msg.embeds.len()
         );
 
-        // 1. Dynamic Nickname AND Username Gatekeeper (Strict Ban)
+        // =========================================================================
+        // 1. TWO-TIER NAME GATEKEEPER: Hardcoded = BAN | Dynamic 'link' = DELETE ONLY
+        // =========================================================================
         let username = &msg.author.name;
         let nickname = msg
             .member
@@ -333,43 +376,84 @@ impl EventHandler for Handler {
             .and_then(|m| m.nick.as_deref())
             .unwrap_or("");
 
-        let is_predatory =
-            container.gatekeeper.is_flagged(username) || container.gatekeeper.is_flagged(nickname);
+        let verdict_user = container.gatekeeper.evaluate_threat(username);
+        let verdict_nick = container.gatekeeper.evaluate_threat(nickname);
 
-        if is_predatory {
-            let offending_name = if container.gatekeeper.is_flagged(nickname) {
-                nickname
-            } else {
-                username
-            };
+        let highest_verdict = match (verdict_user, verdict_nick) {
+            (ThreatVerdict::InstantBan, _) | (_, ThreatVerdict::InstantBan) => {
+                ThreatVerdict::InstantBan
+            }
+            (ThreatVerdict::DeleteOnly, _) | (_, ThreatVerdict::DeleteOnly) => {
+                ThreatVerdict::DeleteOnly
+            }
+            _ => ThreatVerdict::Safe,
+        };
 
-            warn!(
-                "🚨 [GATEKEEPER] Banning sender {} for predatory name/nick: '{}'.",
-                author_id, offending_name
-            );
-            let _ = msg.delete(&ctx.http).await;
-            if let Some(guild_id) = msg.guild_id {
-                execute_ban(
-                    &ctx.http,
-                    guild_id,
-                    author_id,
-                    &format!("Predatory Name Match: {}", offending_name),
-                    1.0,
-                    &container.db,
-                )
-                .await;
+        match highest_verdict {
+            ThreatVerdict::InstantBan => {
+                let offending_name = if container.gatekeeper.evaluate_threat(nickname)
+                    == ThreatVerdict::InstantBan
+                {
+                    nickname
+                } else {
+                    username
+                };
+
+                warn!(
+                    "🚨 [GATEKEEPER] Banning sender {} for predatory name/nick: '{}'.",
+                    author_id, offending_name
+                );
+                let _ = msg.delete(&ctx.http).await;
+                if let Some(guild_id) = msg.guild_id {
+                    execute_ban(
+                        &ctx.http,
+                        guild_id,
+                        author_id,
+                        &format!("Predatory Name Match (Hardcoded): {}", offending_name),
+                        1.0,
+                        &container.db,
+                    )
+                    .await;
+                    send_mod_alert(
+                        &ctx,
+                        "Predatory User Banned on Message",
+                        &format!(
+                            "Banned <@{}> for predatory name/nick `{}`",
+                            author_id, offending_name
+                        ),
+                        author_id,
+                    )
+                    .await;
+                }
+                return;
+            }
+            ThreatVerdict::DeleteOnly => {
+                let offending_name = if container.gatekeeper.evaluate_threat(nickname)
+                    == ThreatVerdict::DeleteOnly
+                {
+                    nickname
+                } else {
+                    username
+                };
+
+                warn!(
+                    "⚠️ [SOFT NAME POLICY] Deleting message from {} due to soft name rule: '{}'. User NOT banned.",
+                    author_id, offending_name
+                );
+                let _ = msg.delete(&ctx.http).await;
                 send_mod_alert(
                     &ctx,
-                    "Predatory User Banned on Message",
+                    "Message Deleted (Soft Name Policy)",
                     &format!(
-                        "Banned <@{}> for predatory name/nick `{}`",
+                        "Deleted message from <@{}> because their name/nickname (`{}`) contains a restricted keyword. User was not banned.",
                         author_id, offending_name
                     ),
                     author_id,
                 )
                 .await;
+                return;
             }
-            return;
+            ThreatVerdict::Safe => {}
         }
 
         // =========================================================================
@@ -379,7 +463,6 @@ impl EventHandler for Handler {
             if let Ok(bytes) = download_image(&container.http_client, &avatar_url).await {
                 let sha256 = CryptoEngine::sha256(&bytes);
 
-                // Fast Cache Check: If their avatar is already blacklisted in Atlas
                 if let Ok(true) = container.db.is_image_blacklisted(&sha256).await {
                     warn!(
                         "🚨 [MUTED] Deleting message from {} due to blacklisted adult avatar.",
@@ -407,12 +490,14 @@ impl EventHandler for Handler {
                         bytes,
                     )
                     .await;
-                    return; // Message deleted; halt execution
+                    return;
                 }
             }
         }
 
+        // =========================================================================
         // 3. Collect image URLs from attachments AND third-party bot embeds
+        // =========================================================================
         let mut image_urls = Vec::new();
 
         for attachment in &msg.attachments {
@@ -432,7 +517,9 @@ impl EventHandler for Handler {
             }
         }
 
+        // =========================================================================
         // 4. Inspect every image through the SFW classifier pipeline
+        // =========================================================================
         for (url, source) in image_urls {
             info!(
                 "🔍 [INSPECT] Scanning {} from {}: {}",
@@ -532,7 +619,44 @@ impl TypeMapKey for BotContainerKey {
     type Value = Arc<BotContainer>;
 }
 
-/// Tier 1 Alert: Dispatches clean, text-only embed to Moderator Channel (NO explicit images shown)
+/// Active Welcome Channel Sweeper: Retries every 800ms to catch and purge Sapphire's welcome card
+async fn purge_welcome_channel_on_nsfw_join(http: Arc<serenity::http::Http>) {
+    let channel = ChannelId::new(WELCOME_CHANNEL_ID);
+    info!("🧹 [SWEEPER] Launching active sweep on #welcome for flagged join...");
+
+    for attempt in 1..=4 {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        match channel.messages(&http, GetMessages::new().limit(3)).await {
+            Ok(messages) => {
+                for msg in messages {
+                    let now = serenity::model::Timestamp::now().unix_timestamp();
+                    let msg_time = msg.timestamp.unix_timestamp();
+
+                    if (now - msg_time).abs() < 60
+                        && (msg.author.bot || msg.author.id.get() == 678344927997853742)
+                    {
+                        warn!("🚨 [PURGE] Found recent welcome message from {} (ID: {}). Deleting on attempt {}...", msg.author.name, msg.id, attempt);
+                        match channel.delete_message(&http, msg.id).await {
+                            Ok(()) => {
+                                info!("✅ [SWEEPER SUCCESS] Deleted welcome card from #welcome on attempt {}!", attempt);
+                                return;
+                            }
+                            Err(e) => {
+                                error!("❌ CRITICAL DISCORD ERROR: Failed to delete message in #welcome: {}. Check 'Manage Messages' permission!", e);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("❌ FAILED FETCHING #welcome messages: {}. Check 'Read Message History' permission!", e);
+            }
+        }
+    }
+}
+
+/// Tier 1 Alert: Dispatches clean, text-only embed to Moderator Channel
 async fn send_mod_alert(ctx: &Context, title: &str, description: &str, offender_id: u64) {
     let channel = ChannelId::new(MOD_CHANNEL_ID);
     let embed = CreateEmbed::new()
@@ -557,7 +681,7 @@ async fn send_mod_alert(ctx: &Context, title: &str, description: &str, offender_
     }
 }
 
-/// Tier 2 Alert: Dispatches full evidence embed WITH the downloaded image attached to Logs Channel (1492554211118809319)
+/// Tier 2 Alert: Dispatches full evidence embed WITH image attached to Logs Channel
 async fn send_logs_evidence(
     ctx: &Context,
     title: &str,
@@ -600,6 +724,14 @@ async fn execute_ban(
     confidence: f64,
     db: &DatabaseEngine,
 ) {
+    if user_id == OWNER_USER_ID {
+        warn!(
+            "🛡️ [SOVEREIGN IMMUNITY] Refusing to ban the Architect ({}).",
+            user_id
+        );
+        return;
+    }
+
     let user = UserId::new(user_id);
     let result = guild_id.ban_with_reason(http, user, 7, reason).await;
 
