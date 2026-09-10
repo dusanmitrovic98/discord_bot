@@ -36,7 +36,6 @@ pub fn build_web_router(state: AppState) -> Router {
                 .post(routes::add_rule)
                 .delete(routes::delete_rule),
         )
-        // Whitelist Studio (Users & Images)
         .route(
             "/api/whitelist/users",
             get(routes::list_whitelisted_users)
