@@ -1,8 +1,11 @@
 use serenity::async_trait;
 use serenity::builder::{
-    CreateCommand, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseMessage, EditInteractionResponse,
 };
-use serenity::model::application::{CommandDataOptionValue, CommandOptionType, Interaction};
+use serenity::model::application::{
+    CommandDataOptionValue, CommandInteraction, CommandOptionType, Interaction,
+};
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::model::guild::{Guild, Member};
@@ -20,7 +23,7 @@ use crate::pipeline::media_guard::{triage_media, MediaVerdict};
 use crate::pipeline::name_guard::evaluate_member_names;
 use crate::pipeline::sweeper::purge_welcome_channel_on_nsfw_join;
 use crate::plugin_engine::DynamicPluginEngine;
-use crate::queue::{BoundedScanQueue, ResilientClassifierClient};
+use crate::queue::{BoundedScanQueue, ResilientClassifierClient, ScanTask};
 use crate::whitelist::WhitelistRegistry;
 use crate::Result;
 
@@ -35,24 +38,20 @@ pub struct BotContainer {
 }
 
 impl BotContainer {
-    /// Factory Bootstrap Method (Eliminates 70 lines of procedural noise in main)
     pub async fn bootstrap(
         db: Arc<DatabaseEngine>,
         config: Arc<GuildConfig>,
         classifier_url: String,
     ) -> Result<Arc<Self>> {
-        // 1. Sync Gatekeeper dynamic rules
         let gatekeeper = Arc::new(TextGatekeeper::new());
         if let Ok(rules) = db.fetch_dynamic_rules().await {
             let patterns: Vec<String> = rules.into_iter().map(|r| r.pattern).collect();
             let _ = gatekeeper.reload_dynamic_patterns(&patterns);
         }
 
-        // 2. Sync Whitelist registry
         let whitelist = Arc::new(WhitelistRegistry::new());
         let _ = whitelist.sync_from_db(&db).await;
 
-        // 3. Media Inspector & AI Queue
         let http_client = reqwest::Client::new();
         let media_inspector = Arc::new(MediaInspector::new(
             http_client.clone(),
@@ -61,7 +60,6 @@ impl BotContainer {
         let classifier_client = Arc::new(ResilientClassifierClient::new(classifier_url));
         let scan_queue = Arc::new(BoundedScanQueue::new(500, classifier_client));
 
-        // 4. WASM Plugin Engine Sync
         let plugin_engine = Arc::new(DynamicPluginEngine::new());
         if let Ok(plugins) = db.fetch_active_plugins().await {
             for (name, bytecode) in plugins {
@@ -138,8 +136,8 @@ impl EventHandler for Handler {
     }
 
     async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
-        let c = get_container(&ctx).await;
-        if !c.config.is_authorized_guild(guild.id.get()) {
+        let container = get_container(&ctx).await;
+        if !container.config.is_authorized_guild(guild.id.get()) {
             warn!(
                 "🚨 Evicting from unauthorized guild: {} ({})",
                 guild.name, guild.id
@@ -206,7 +204,6 @@ impl EventHandler for Handler {
         }
     }
 
-    /// Linearized, readable message handler (<35 lines, NASA Rule 1)
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.id == ctx.cache.current_user().id {
             return;
@@ -216,17 +213,12 @@ impl EventHandler for Handler {
             return;
         }
 
-        // Guard 1: Name threat evaluation
         if guard_author_names(&ctx, &c, &msg).await {
             return;
         }
-
-        // Guard 2: Author profile picture check
         if guard_author_pfp(&ctx, &c, &msg).await {
             return;
         }
-
-        // Guard 3: Message media streams (attachments and embeds)
         inspect_message_media(&ctx, &c, &msg).await;
     }
 
@@ -239,7 +231,7 @@ impl EventHandler for Handler {
 }
 
 // =============================================================================
-// SUBROUTINE GUARDS (Single Responsibility, NASA Rule 4)
+// SUBROUTINE GUARDS & HELPERS (NASA Rule 1 & 4)
 // =============================================================================
 
 async fn get_container(ctx: &Context) -> Arc<BotContainer> {
@@ -528,11 +520,11 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
     }
 }
 
-async fn handle_slash_command(
-    ctx: &Context,
-    c: &BotContainer,
-    cmd: serenity::model::application::CommandInteraction,
-) {
+// =============================================================================
+// MODULAR SLASH COMMAND ROUTER & HANDLERS (NASA Rule 1 & 4)
+// =============================================================================
+
+async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInteraction) {
     let caller_id = cmd.user.id.get();
     let roles: Vec<u64> = cmd
         .member
@@ -554,85 +546,11 @@ async fn handle_slash_command(
     }
 
     match cmd.data.name.as_str() {
-        "test-name" => {
-            let text = cmd
-                .data
-                .options
-                .iter()
-                .find(|o| o.name == "text")
-                .and_then(|o| o.value.as_str())
-                .unwrap_or("");
-            let verdict = c.gatekeeper.evaluate_threat(text);
-            let (norm, alpha, deduped) = c.gatekeeper.canonicalize(text);
-            let reply = format!("🧪 **Gatekeeper Test:** `{}`\n> **Verdict:** {:?}\n> **Normalized:** `{}`\n> **Alphanumeric:** `{}`\n> **Deduped:** `{}`", text, verdict, norm, alpha, deduped);
-            let _ = cmd
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content(reply),
-                    ),
-                )
-                .await;
-        }
-        "whitelist-user" => {
-            let mut target_id = 0u64;
-            let mut target_name = String::new();
-            let mut reason = "Staff Override".to_string();
-            for opt in &cmd.data.options {
-                if opt.name == "user" {
-                    if let CommandDataOptionValue::User(uid) = &opt.value {
-                        target_id = uid.get();
-                        if let Some(u) = cmd.data.resolved.users.get(uid) {
-                            target_name = u.name.clone();
-                        }
-                    }
-                } else if opt.name == "reason" {
-                    if let CommandDataOptionValue::String(r) = &opt.value {
-                        reason = r.clone();
-                    }
-                }
-            }
-            if target_id != 0 {
-                let _ =
-                    c.db.add_whitelisted_user(&target_name, &cmd.user.name, &reason)
-                        .await;
-                let _ =
-                    c.db.add_whitelisted_user(&target_id.to_string(), &cmd.user.name, &reason)
-                        .await;
-                c.whitelist.add_user(&target_name).await;
-                c.whitelist.add_user(&target_id.to_string()).await;
-                let reply = format!(
-                    "✅ Whitelisted <@{}> (`{}`) by **{}** (Reason: `{}`).",
-                    target_id, target_name, cmd.user.name, reason
-                );
-                let _ = cmd
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new().content(reply),
-                        ),
-                    )
-                    .await;
-            }
-        }
-        "db-stats" => {
-            let reply = match c.db.get_storage_stats().await {
-                Ok((used, max)) => {
-                    let u_mb = used as f64 / (1024.0 * 1024.0);
-                    let m_mb = max as f64 / (1024.0 * 1024.0);
-                    format!("📊 **MongoDB Atlas M0 Storage:** `{:.2} MB` / `{:.0} MB` (Remaining: `{:.2} MB`)", u_mb, m_mb, m_mb - u_mb)
-                }
-                Err(e) => format!("❌ Failed: {}", e),
-            };
-            let _ = cmd
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content(reply),
-                    ),
-                )
-                .await;
-        }
+        "test-name" => cmd_test_name(ctx, c, &cmd).await,
+        "test-pfp" => cmd_test_pfp(ctx, c, &cmd).await,
+        "whitelist-user" => cmd_whitelist_user(ctx, c, &cmd).await,
+        "whitelist-pfp" => cmd_whitelist_pfp(ctx, c, &cmd).await,
+        "db-stats" => cmd_db_stats(ctx, c, &cmd).await,
         _ => {
             let _ = cmd
                 .create_response(
@@ -644,6 +562,282 @@ async fn handle_slash_command(
                 .await;
         }
     }
+}
+
+async fn cmd_test_name(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let text = cmd
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "text")
+        .and_then(|o| o.value.as_str())
+        .unwrap_or("");
+    let verdict = c.gatekeeper.evaluate_threat(text);
+    let (norm, alpha, deduped) = c.gatekeeper.canonicalize(text);
+    let reply = format!("🧪 **Gatekeeper Test:** `{}`\n> **Verdict:** {:?}\n> **Normalized:** `{}`\n> **Alphanumeric:** `{}`\n> **Deduped:** `{}`", text, verdict, norm, alpha, deduped);
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().content(reply),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let _ = cmd.defer(&ctx.http).await;
+
+    let mut target_url = None;
+    for opt in &cmd.data.options {
+        if opt.name == "image" {
+            if let CommandDataOptionValue::Attachment(att_id) = &opt.value {
+                target_url = cmd
+                    .data
+                    .resolved
+                    .attachments
+                    .get(att_id)
+                    .map(|a| a.url.clone());
+            }
+        } else if opt.name == "user" {
+            if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_url = cmd
+                    .data
+                    .resolved
+                    .users
+                    .get(uid)
+                    .and_then(|u| u.avatar_url());
+            }
+        }
+    }
+
+    if target_url.is_none() {
+        target_url = cmd.user.avatar_url();
+    }
+
+    let Some(url) = target_url else {
+        let _ = cmd
+            .edit_response(
+                &ctx.http,
+                EditInteractionResponse::new().content("❌ No avatar or image found to analyze."),
+            )
+            .await;
+        return;
+    };
+
+    let Ok(payload) = c.media_inspector.inspect_url(&url).await else {
+        let _ = cmd
+            .edit_response(
+                &ctx.http,
+                EditInteractionResponse::new().content("❌ Failed downloading image."),
+            )
+            .await;
+        return;
+    };
+
+    let is_whitelisted = c.whitelist.is_image_safe(&payload.sha256).await;
+    let is_blacklisted =
+        c.db.is_image_blacklisted(&payload.sha256)
+            .await
+            .unwrap_or(false);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let task = ScanTask {
+        user_id: cmd.user.id.get(),
+        guild_id: c.config.authorized_guild_id,
+        image_url: url.clone(),
+        image_bytes: payload.bytes,
+        response_tx: tx,
+    };
+
+    if c.scan_queue.submit(task).await.is_ok() {
+        if let Ok(Ok(resp)) = rx.await {
+            let verdict_str = if is_whitelisted {
+                "🟢 **VERIFIED SAFE (Whitelisted)**"
+            } else if resp.confidence.nsfw >= c.config.nsfw_auto_delete_threshold || is_blacklisted
+            {
+                "🚨 **NSFW (Flagged)**"
+            } else {
+                "✅ **SAFE**"
+            };
+
+            let reply = format!(
+                "🧪 **Avatar ViT Classifier Test**\n\
+                > **URL:** {}\n\
+                > **SHA-256:** `{}`\n\
+                > **Cache:** Whitelisted: `{}` | Blacklisted: `{}`\n\
+                > **Verdict:** {}\n\
+                > **Confidence:** Safe: `{:.1}%` | NSFW: `{:.1}%`\n\
+                > **Inference Latency:** `{}`",
+                url,
+                payload.sha256,
+                is_whitelisted,
+                is_blacklisted,
+                verdict_str,
+                resp.confidence.safe,
+                resp.confidence.nsfw,
+                resp.processing_time
+            );
+
+            let _ = cmd
+                .edit_response(&ctx.http, EditInteractionResponse::new().content(reply))
+                .await;
+            return;
+        }
+    }
+
+    let _ = cmd
+        .edit_response(
+            &ctx.http,
+            EditInteractionResponse::new().content("❌ AI Classifier queue timeout."),
+        )
+        .await;
+}
+
+async fn cmd_whitelist_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let mut target_id = 0u64;
+    let mut target_name = String::new();
+    let mut reason = "Staff Override".to_string();
+
+    for opt in &cmd.data.options {
+        if opt.name == "user" {
+            if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_id = uid.get();
+                if let Some(u) = cmd.data.resolved.users.get(uid) {
+                    target_name = u.name.clone();
+                }
+            }
+        } else if opt.name == "reason" {
+            if let CommandDataOptionValue::String(r) = &opt.value {
+                reason = r.clone();
+            }
+        }
+    }
+
+    if target_id == 0 {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("❌ Invalid user specified.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let _ =
+        c.db.add_whitelisted_user(&target_name, &cmd.user.name, &reason)
+            .await;
+    let _ =
+        c.db.add_whitelisted_user(&target_id.to_string(), &cmd.user.name, &reason)
+            .await;
+    c.whitelist.add_user(&target_name).await;
+    c.whitelist.add_user(&target_id.to_string()).await;
+
+    let reply = format!(
+        "✅ Whitelisted <@{}> (`{}`) by **{}** (Reason: `{}`).",
+        target_id, target_name, cmd.user.name, reason
+    );
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().content(reply),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let mut target_id = 0u64;
+    let mut target_name = String::new();
+    let mut avatar_url = None;
+
+    for opt in &cmd.data.options {
+        if opt.name == "user" {
+            if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_id = uid.get();
+                if let Some(u) = cmd.data.resolved.users.get(uid) {
+                    target_name = u.name.clone();
+                    avatar_url = u.avatar_url();
+                }
+            }
+        }
+    }
+
+    let Some(url) = avatar_url else {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("❌ Target user has no custom avatar set to whitelist.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    };
+
+    if let Ok(payload) = c.media_inspector.inspect_url(&url).await {
+        let label = format!("PFP Whitelist: @{}", target_name);
+        let _ =
+            c.db.add_whitelisted_image(&payload.sha256, &label, &cmd.user.name)
+                .await;
+        c.whitelist.add_image(&payload.sha256).await;
+
+        let reply = format!(
+            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n*This image will permanently skip AI classification and message deletions.*",
+            target_id, payload.sha256
+        );
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new().content(reply),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("❌ Failed downloading user avatar.")
+                    .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_db_stats(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let reply = match c.db.get_storage_stats().await {
+        Ok((used, max)) => {
+            let u_mb = used as f64 / (1024.0 * 1024.0);
+            let m_mb = max as f64 / (1024.0 * 1024.0);
+            format!(
+                "📊 **MongoDB Atlas M0 Storage:** `{:.2} MB` / `{:.0} MB` (Remaining: `{:.2} MB`)",
+                u_mb,
+                m_mb,
+                m_mb - u_mb
+            )
+        }
+        Err(e) => format!("❌ Failed: {}", e),
+    };
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().content(reply),
+            ),
+        )
+        .await;
 }
 
 pub async fn execute_ban(
