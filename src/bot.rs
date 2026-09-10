@@ -36,7 +36,7 @@ pub struct BotContainer {
     pub media_inspector: Arc<MediaInspector>,
     pub scan_queue: Arc<BoundedScanQueue>,
     pub plugin_engine: Arc<DynamicPluginEngine>,
-    pub blacklisted_dhashes: Arc<RwLock<Vec<u64>>>, // In-Memory dHash Mirror (<2μs checks)
+    pub blacklisted_dhashes: Arc<RwLock<Vec<u64>>>,
 }
 
 impl BotContainer {
@@ -54,7 +54,6 @@ impl BotContainer {
         let whitelist = Arc::new(WhitelistRegistry::new());
         let _ = whitelist.sync_from_db(&db).await;
 
-        // Populate in-memory dHash cache on boot (eliminates remote O(N) database cursor)
         let dhashes = db.fetch_all_dhashes().await.unwrap_or_default();
         let blacklisted_dhashes = Arc::new(RwLock::new(dhashes));
 
@@ -66,10 +65,10 @@ impl BotContainer {
         let classifier_client = Arc::new(ResilientClassifierClient::new(classifier_url));
         let scan_queue = Arc::new(BoundedScanQueue::new(500, classifier_client));
 
-        let plugin_engine = Arc::new(DynamicPluginEngine::new());
-        if let Ok(plugins) = db.fetch_active_plugins().await {
-            for (name, bytecode) in plugins {
-                let _ = plugin_engine.hot_swap_plugin(&name, &bytecode);
+        let plugin_engine = Arc::new(DynamicPluginEngine::new().with_db(db.clone()));
+        if let Ok(records) = db.fetch_all_plugin_records().await {
+            for p in records.into_iter().filter(|r| r.enabled) {
+                let _ = plugin_engine.hot_swap_plugin(&p.name, &p.bytecode.bytes);
             }
         }
 
@@ -98,12 +97,12 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
         let c = get_container(&ctx).await;
         info!(
-            "Sebastian The Butler is Online. Operating for Guild: {}",
+            "Sebastian The Butler Online. Registering commands for Guild: {}",
             c.config.authorized_guild_id
         );
 
         let guild_id = GuildId::new(c.config.authorized_guild_id);
-        let commands = vec![
+        let mut commands = vec![
             CreateCommand::new("test-name")
                 .description("Evaluate any username against Gatekeeper")
                 .add_option(
@@ -138,6 +137,14 @@ impl EventHandler for Handler {
                 ),
             CreateCommand::new("db-stats").description("Audit MongoDB cloud storage usage"),
         ];
+
+        // Dynamically register slash commands declared by installed WASM plugins!
+        for manifest in c.plugin_engine.get_all_manifests() {
+            for def in manifest.slash_commands {
+                info!("🧩 Registering plugin slash command: /{}", def.name);
+                commands.push(CreateCommand::new(&def.name).description(&def.description));
+            }
+        }
 
         let _ = guild_id.set_commands(&ctx.http, commands).await;
     }
@@ -237,7 +244,7 @@ impl EventHandler for Handler {
     }
 }
 
-// Subroutines
+// Subroutines (<40 lines each, NASA Rule 1 & 4)
 async fn get_container(ctx: &Context) -> Arc<BotContainer> {
     ctx.data
         .read()
@@ -548,15 +555,55 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
         "whitelist-user" => cmd_whitelist_user(ctx, c, &cmd).await,
         "whitelist-pfp" => cmd_whitelist_pfp(ctx, c, &cmd).await,
         "db-stats" => cmd_db_stats(ctx, c, &cmd).await,
-        _ => {
-            let _ = cmd
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content("Command acknowledged."),
-                    ),
-                )
-                .await;
+        plugin_cmd => {
+            // Dynamic Community Plugin Dispatcher!
+            let mut handled = false;
+            for manifest in c.plugin_engine.get_all_manifests() {
+                if manifest.slash_commands.iter().any(|s| s.name == plugin_cmd) {
+                    handled = true;
+                    let opts_json = serde_json::to_string(&cmd.data.options).unwrap_or_default();
+                    match c.plugin_engine.execute_slash_command(
+                        &manifest.name,
+                        plugin_cmd,
+                        &opts_json,
+                    ) {
+                        Ok(reply) => {
+                            let _ = cmd
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new().content(reply),
+                                    ),
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = cmd
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content(format!("❌ Plugin execution trapped: {}", e))
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
+                    break;
+                }
+            }
+            if !handled {
+                let _ = cmd
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Command acknowledged."),
+                        ),
+                    )
+                    .await;
+            }
         }
     }
 }

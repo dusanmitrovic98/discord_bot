@@ -30,8 +30,8 @@
         h1 { font-size: 2.2rem; font-weight: 800; margin-bottom: 12px; letter-spacing: -0.5px; }
         .lead { color: var(--text-muted); margin-bottom: 32px; font-size: 1.05rem; }
         
-        /* Modular Cards Grid (Refactoring.Guru Style) */
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 36px; }
+        /* Refactoring.Guru Modular Grid */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin-bottom: 36px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 20px; cursor: pointer; transition: all 0.2s ease; position: relative; }
         .card:hover { border-color: #555b63; background: var(--surface-hover); transform: translateY(-2px); }
         .card.active { border-color: var(--primary); }
@@ -39,12 +39,10 @@
         .card-title { font-size: 1.15rem; font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
         .card-desc { color: var(--text-muted); font-size: 0.82rem; line-height: 1.4; }
 
-        /* Panel Sections */
         .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 28px; margin-bottom: 32px; }
         .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
         .panel-title { font-size: 1.2rem; font-weight: 700; }
 
-        /* Tables & Forms */
         table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
         th { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--text-muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px; }
         td { padding: 14px 16px; border-bottom: 1px solid #2d3135; vertical-align: middle; }
@@ -59,7 +57,6 @@
         .btn-sm { padding: 6px 12px; font-size: 0.8rem; }
         .form-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
         
-        /* Auth Modal */
         #auth-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .auth-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; width: 100%; max-width: 400px; padding: 36px; }
         .auth-title { font-size: 1.5rem; font-weight: 800; margin-bottom: 8px; }
@@ -103,9 +100,8 @@
         </div>
 
         <h1>Defense Architecture & Control</h1>
-        <p class="lead">Autonomous threat neutralization, dynamic regex injection, and sovereign whitelist overrides.</p>
+        <p class="lead">Autonomous threat neutralization, microkernel plugin orchestration, and live overrides.</p>
 
-        <!-- Refactoring.Guru Modular Cards Grid -->
         <div class="grid">
             <div class="card active" onclick="switchTab('regex')">
                 <div class="card-icon">⚙️</div>
@@ -121,6 +117,11 @@
                 <div class="card-icon">🖼️</div>
                 <div class="card-title">Image Blacklist <span class="badge">dHash</span></div>
                 <div class="card-desc">Blacklist logos like the Mega 'M' via SHA256 & dHash.</div>
+            </div>
+            <div class="card" onclick="switchTab('plugins')">
+                <div class="card-icon">🧩</div>
+                <div class="card-title">Community Plugins <span class="badge" style="color: #9b59b6;">OBSIDIAN</span></div>
+                <div class="card-desc">Install WASM modules for dynamic commands and webhooks.</div>
             </div>
             <div class="card" onclick="switchTab('audits')">
                 <div class="card-icon">📋</div>
@@ -141,7 +142,7 @@
             </div>
             <form onsubmit="addRegexRule(event)" class="form-row">
                 <input type="text" id="new-rule-pattern" placeholder="e.g. (?i)l+i+n+k+" style="flex: 2;" required>
-                <input type="text" id="new-rule-desc" placeholder="Rule Description (e.g. Soft link filter)" style="flex: 2;" required>
+                <input type="text" id="new-rule-desc" placeholder="Rule Description" style="flex: 2;" required>
                 <select id="new-rule-action" style="flex: 1;">
                     <option value="delete">Delete Message Only (Soft)</option>
                     <option value="ban">Instant Ban (Predator)</option>
@@ -149,16 +150,12 @@
                 <button type="submit" class="btn">+ Add Dynamic Rule</button>
             </form>
             <table>
-                <thead>
-                    <tr><th>Type</th><th>Pattern</th><th>Description</th><th>Action</th><th>Status</th><th>Action</th></tr>
-                </thead>
-                <tbody id="rules-tbody">
-                    <tr><td colspan="6" style="text-align: center;">Loading rules...</td></tr>
-                </tbody>
+                <thead><tr><th>Type</th><th>Pattern</th><th>Description</th><th>Action</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody id="rules-tbody"><tr><td colspan="6" style="text-align: center;">Loading rules...</td></tr></tbody>
             </table>
         </div>
 
-        <!-- TAB: WHITELIST STUDIO (OVERRIDES) -->
+        <!-- TAB: WHITELIST STUDIO -->
         <div class="panel" id="tab-whitelist" style="display: none;">
             <div class="panel-header">
                 <div class="panel-title">Whitelisted Users (Soft Filter Bypass)</div>
@@ -169,29 +166,21 @@
                 <button type="submit" class="btn btn-success">+ Whitelist User</button>
             </form>
             <table>
-                <thead>
-                    <tr><th>Identifier</th><th>Reason</th><th>Added By</th><th>Action</th></tr>
-                </thead>
-                <tbody id="wl-users-tbody">
-                    <tr><td colspan="4" style="text-align: center;">Loading whitelisted users...</td></tr>
-                </tbody>
+                <thead><tr><th>Identifier</th><th>Reason</th><th>Added By</th><th>Action</th></tr></thead>
+                <tbody id="wl-users-tbody"><tr><td colspan="4" style="text-align: center;">Loading whitelisted users...</td></tr></tbody>
             </table>
 
             <div class="panel-header" style="margin-top: 32px;">
                 <div class="panel-title">Whitelisted Images (Verified Safe Hashes)</div>
             </div>
             <form onsubmit="addWhitelistedImage(event)" class="form-row">
-                <input type="url" id="new-wl-image-url" placeholder="Paste image URL to mark as safe" style="flex: 3;" required>
+                <input type="url" id="new-wl-image-url" placeholder="Image URL to mark as safe" style="flex: 3;" required>
                 <input type="text" id="new-wl-image-label" placeholder="Label (e.g. Server Banner)" style="flex: 2;" required>
                 <button type="submit" class="btn btn-success">+ Whitelist Image</button>
             </form>
             <table>
-                <thead>
-                    <tr><th>Label</th><th>SHA-256 Hash</th><th>Added By</th><th>Action</th></tr>
-                </thead>
-                <tbody id="wl-images-tbody">
-                    <tr><td colspan="4" style="text-align: center;">Loading whitelisted images...</td></tr>
-                </tbody>
+                <thead><tr><th>Label</th><th>SHA-256 Hash</th><th>Added By</th><th>Action</th></tr></thead>
+                <tbody id="wl-images-tbody"><tr><td colspan="4" style="text-align: center;">Loading whitelisted images...</td></tr></tbody>
             </table>
         </div>
 
@@ -206,12 +195,24 @@
                 <button type="submit" class="btn">+ Blacklist Image Signature</button>
             </form>
             <table>
-                <thead>
-                    <tr><th>Label</th><th>SHA-256 Signature</th><th>Perceptual dHash</th><th>Added By</th><th>Action</th></tr>
-                </thead>
-                <tbody id="images-tbody">
-                    <tr><td colspan="5" style="text-align: center;">Loading signatures...</td></tr>
-                </tbody>
+                <thead><tr><th>Label</th><th>SHA-256 Signature</th><th>Perceptual dHash</th><th>Added By</th><th>Action</th></tr></thead>
+                <tbody id="images-tbody"><tr><td colspan="5" style="text-align: center;">Loading signatures...</td></tr></tbody>
+            </table>
+        </div>
+
+        <!-- TAB: COMMUNITY PLUGINS -->
+        <div class="panel" id="tab-plugins" style="display: none;">
+            <div class="panel-header">
+                <div class="panel-title">WASM Community Plugins (Microkernel Extension)</div>
+            </div>
+            <form onsubmit="uploadPlugin(event)" class="form-row">
+                <input type="text" id="new-plugin-name" placeholder="Plugin Identifier (e.g. coinflip_cmd)" style="flex: 2;" required>
+                <input type="text" id="new-plugin-wasm" placeholder="Base64 or Hex of .wasm file" style="flex: 3;" required>
+                <button type="submit" class="btn" style="background: #9b59b6;">+ Install Plugin</button>
+            </form>
+            <table>
+                <thead><tr><th>Plugin Name</th><th>Commands</th><th>Webhooks</th><th>Payload</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody id="plugins-tbody"><tr><td colspan="6" style="text-align: center;">Loading plugins...</td></tr></tbody>
             </table>
         </div>
 
@@ -221,12 +222,8 @@
                 <div class="panel-title">Live Moderation Audit Ledger</div>
             </div>
             <table>
-                <thead>
-                    <tr><th>Timestamp</th><th>User ID</th><th>Target User</th><th>Reason</th><th>Confidence</th><th>1-Click Action</th></tr>
-                </thead>
-                <tbody id="audits-tbody">
-                    <tr><td colspan="6" style="text-align: center;">Loading audit stream...</td></tr>
-                </tbody>
+                <thead><tr><th>Timestamp</th><th>User ID</th><th>Target User</th><th>Reason</th><th>Confidence</th><th>1-Click Action</th></tr></thead>
+                <tbody id="audits-tbody"><tr><td colspan="6" style="text-align: center;">Loading audit stream...</td></tr></tbody>
             </table>
         </div>
 
@@ -241,15 +238,10 @@
                 <button type="submit" class="btn">+ Create Moderator</button>
             </form>
             <table>
-                <thead>
-                    <tr><th>Username</th><th>Role</th><th>Created At</th></tr>
-                </thead>
-                <tbody id="users-tbody">
-                    <tr><td colspan="3" style="text-align: center;">Loading users...</td></tr>
-                </tbody>
+                <thead><tr><th>Username</th><th>Role</th><th>Created At</th></tr></thead>
+                <tbody id="users-tbody"><tr><td colspan="3" style="text-align: center;">Loading users...</td></tr></tbody>
             </table>
         </div>
-
     </div>
 
     <script>
@@ -262,7 +254,7 @@
             if (!data.has_admin) {
                 document.getElementById('auth-modal').style.display = 'flex';
                 document.getElementById('auth-box-title').innerText = "Initialize Sovereign Admin";
-                document.getElementById('auth-box-desc').innerText = "No admin exists yet. The first account created will be permanently assigned Master Admin.";
+                document.getElementById('auth-box-desc').innerText = "No admin exists. The first account created will be Master Admin.";
                 document.getElementById('auth-submit-btn').innerText = "Create Master Admin";
             } else if (!data.authenticated) {
                 document.getElementById('auth-modal').style.display = 'flex';
@@ -289,11 +281,7 @@
                 body: JSON.stringify({ username, password })
             });
 
-            if (res.ok) {
-                location.reload();
-            } else {
-                alert('Authentication failed: Invalid credentials.');
-            }
+            if (res.ok) { location.reload(); } else { alert('Authentication failed.'); }
         }
 
         async function logout() {
@@ -302,11 +290,11 @@
         }
 
         function switchTab(tab) {
-            ['regex', 'whitelist', 'images', 'audits', 'users'].forEach(t => {
+            ['regex', 'whitelist', 'images', 'plugins', 'audits', 'users'].forEach(t => {
                 document.getElementById('tab-' + t).style.display = t === tab ? 'block' : 'none';
             });
             document.querySelectorAll('.card').forEach((c, idx) => {
-                c.classList.toggle('active', ['regex', 'whitelist', 'images', 'audits', 'users'][idx] === tab);
+                c.classList.toggle('active', ['regex', 'whitelist', 'images', 'plugins', 'audits', 'users'][idx] === tab);
             });
         }
 
@@ -314,6 +302,7 @@
             loadRules();
             loadWhitelists();
             loadImages();
+            loadPlugins();
             loadAudits();
             loadUsers();
         }
@@ -371,8 +360,7 @@
                 document.getElementById('new-rule-desc').value = '';
                 loadRules();
             } else {
-                const err = await res.text();
-                alert('Regex Rejected: ' + err);
+                alert('Invalid regex syntax.');
             }
         }
 
@@ -384,7 +372,6 @@
         }
 
         async function loadWhitelists() {
-            // Load Users
             const uRes = await fetch('/api/whitelist/users');
             const uData = await uRes.json();
             const uTbody = document.getElementById('wl-users-tbody');
@@ -398,7 +385,6 @@
                 </tr>`;
             });
 
-            // Load Images
             const iRes = await fetch('/api/whitelist/images');
             const iData = await iRes.json();
             const iTbody = document.getElementById('wl-images-tbody');
@@ -431,7 +417,7 @@
         }
 
         async function deleteWlUser(identifier) {
-            if (confirm('Remove whitelist for: ' + identifier + '?')) {
+            if (confirm('Remove: ' + identifier + '?')) {
                 await fetch('/api/whitelist/users?identifier=' + encodeURIComponent(identifier), { method: 'DELETE' });
                 loadWhitelists();
             }
@@ -469,7 +455,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ identifier: username, reason })
                 });
-                alert('User @' + username + ' is now whitelisted!');
+                alert('User @' + username + ' whitelisted!');
                 loadWhitelists();
             }
         }
@@ -479,7 +465,6 @@
             const data = await res.json();
             const tbody = document.getElementById('images-tbody');
             tbody.innerHTML = '';
-
             data.forEach(img => {
                 tbody.innerHTML += `<tr>
                     <td><b>${img.label || 'Blacklisted Media'}</b></td>
@@ -501,7 +486,6 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, label })
             });
-
             if (res.ok) {
                 document.getElementById('new-image-url').value = '';
                 document.getElementById('new-image-label').value = '';
@@ -516,12 +500,69 @@
             }
         }
 
+        async function loadPlugins() {
+            const res = await fetch('/api/plugins/list');
+            const data = await res.json();
+            const tbody = document.getElementById('plugins-tbody');
+            tbody.innerHTML = '';
+            data.forEach(p => {
+                const cmds = (p.manifest.slash_commands || []).map(c => `/${c.name}`).join(', ') || 'None';
+                const routes = (p.manifest.http_routes || []).join(', ') || 'None';
+                tbody.innerHTML += `<tr>
+                    <td><b>${p.name}</b></td>
+                    <td><code>${cmds}</code></td>
+                    <td><code>${routes}</code></td>
+                    <td>${(p.bytecode_len / 1024).toFixed(1)} KB</td>
+                    <td>
+                        <button class="btn btn-sm ${p.enabled ? 'btn-success' : 'btn-danger'}" onclick="togglePlugin('${p.name}', ${!p.enabled})">
+                            ${p.enabled ? '🟢 ENABLED' : '⚪ DISABLED'}
+                        </button>
+                    </td>
+                    <td><button class="btn btn-sm btn-danger" onclick="deletePlugin('${p.name}')">Delete</button></td>
+                </tr>`;
+            });
+        }
+
+        async function uploadPlugin(e) {
+            e.preventDefault();
+            const name = document.getElementById('new-plugin-name').value;
+            const wasm_base64 = document.getElementById('new-plugin-wasm').value;
+
+            const res = await fetch('/api/plugins/upload', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, wasm_base64 })
+            });
+            if (res.ok) {
+                document.getElementById('new-plugin-name').value = '';
+                document.getElementById('new-plugin-wasm').value = '';
+                loadPlugins();
+            } else {
+                alert('Upload failed: ' + await res.text());
+            }
+        }
+
+        async function togglePlugin(name, enabled) {
+            await fetch('/api/plugins/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, enabled })
+            });
+            loadPlugins();
+        }
+
+        async function deletePlugin(name) {
+            if (confirm('Delete plugin ' + name + '?')) {
+                await fetch('/api/plugins/delete?name=' + encodeURIComponent(name), { method: 'DELETE' });
+                loadPlugins();
+            }
+        }
+
         async function loadAudits() {
             const res = await fetch('/api/audits');
             const data = await res.json();
             const tbody = document.getElementById('audits-tbody');
             tbody.innerHTML = '';
-
             data.forEach(a => {
                 tbody.innerHTML += `<tr>
                     <td>${new Date(a.timestamp.$date).toLocaleTimeString()}</td>
@@ -529,9 +570,7 @@
                     <td>${a.username}</td>
                     <td>${a.reason}</td>
                     <td><b>${(a.confidence * 100).toFixed(1)}%</b></td>
-                    <td>
-                        <button class="btn btn-sm btn-success" onclick="oneClickWhitelistUser('${a.username.replace(/<@|>/g, '')}')">✓ Whitelist User</button>
-                    </td>
+                    <td><button class="btn btn-sm btn-success" onclick="oneClickWhitelistUser('${a.username.replace(/<@|>/g, '')}')">✓ Whitelist</button></td>
                 </tr>`;
             });
         }
@@ -542,7 +581,6 @@
             const data = await res.json();
             const tbody = document.getElementById('users-tbody');
             tbody.innerHTML = '';
-
             data.forEach(u => {
                 tbody.innerHTML += `<tr>
                     <td><b>${u.username}</b></td>
@@ -562,7 +600,6 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, password })
             });
-
             if (res.ok) {
                 document.getElementById('new-mod-username').value = '';
                 document.getElementById('new-mod-password').value = '';

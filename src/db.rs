@@ -58,6 +58,24 @@ pub struct CoreBlobDocument {
     pub deployed_at: BsonDateTime,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginRecord {
+    pub name: String,
+    pub manifest_json: String,
+    pub bytecode: Binary,
+    pub enabled: bool,
+    pub registered_command_ids: Vec<u64>,
+    pub updated_at: BsonDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginKvEntry {
+    pub plugin_id: String,
+    pub key: String,
+    pub value: String,
+    pub updated_at: BsonDateTime,
+}
+
 #[derive(Clone)]
 pub struct DatabaseEngine {
     db: Database,
@@ -331,5 +349,66 @@ impl DatabaseEngine {
             }
         }
         Ok(plugins)
+    }
+
+    // =========================================================================
+    // COMMUNITY WASM PLUGINS REGISTRY
+    // =========================================================================
+    pub async fn save_plugin_record(&self, record: PluginRecord) -> Result<()> {
+        let coll: Collection<PluginRecord> = self.db.collection("plugins_v2");
+        coll.delete_many(doc! { "name": &record.name }).await?;
+        coll.insert_one(record).await?;
+        Ok(())
+    }
+
+    pub async fn fetch_all_plugin_records(&self) -> Result<Vec<PluginRecord>> {
+        let coll: Collection<PluginRecord> = self.db.collection("plugins_v2");
+        let mut cursor = coll.find(doc! {}).await?;
+        let mut records = Vec::new();
+        while cursor.advance().await? {
+            records.push(cursor.deserialize_current()?);
+        }
+        Ok(records)
+    }
+
+    pub async fn toggle_plugin_record(&self, name: &str, enabled: bool) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("plugins_v2");
+        coll.update_one(
+            doc! { "name": name },
+            doc! { "$set": { "enabled": enabled, "updated_at": BsonDateTime::now() } },
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_plugin_record(&self, name: &str) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("plugins_v2");
+        coll.delete_many(doc! { "name": name }).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // ISOLATED PLUGIN KEY-VALUE STORAGE
+    // =========================================================================
+    pub async fn plugin_kv_set(&self, plugin_id: &str, key: &str, value: &str) -> Result<()> {
+        let coll: Collection<PluginKvEntry> = self.db.collection("plugin_storage");
+        coll.delete_many(doc! { "plugin_id": plugin_id, "key": key })
+            .await?;
+        coll.insert_one(PluginKvEntry {
+            plugin_id: plugin_id.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+            updated_at: BsonDateTime::now(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn plugin_kv_get(&self, plugin_id: &str, key: &str) -> Result<Option<String>> {
+        let coll: Collection<PluginKvEntry> = self.db.collection("plugin_storage");
+        let entry = coll
+            .find_one(doc! { "plugin_id": plugin_id, "key": key })
+            .await?;
+        Ok(entry.map(|e| e.value))
     }
 }
