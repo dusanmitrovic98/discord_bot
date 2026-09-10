@@ -25,7 +25,7 @@ pub struct DynamicRule {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WhitelistedUser {
-    pub identifier: String, // Username (lowercase) or User ID string
+    pub identifier: String,
     pub added_by: String,
     pub reason: String,
     pub created_at: BsonDateTime,
@@ -70,26 +70,18 @@ impl DatabaseEngine {
         Ok(Self { db })
     }
 
-    // =========================================================================
-    // STORAGE METRICS
-    // =========================================================================
     pub async fn get_storage_stats(&self) -> Result<(u64, u64)> {
         let stats = self.db.run_command(doc! { "dbStats": 1 }).await?;
-
         let total_size = match stats.get("totalSize") {
             Some(mongodb::bson::Bson::Int64(v)) => *v as u64,
             Some(mongodb::bson::Bson::Int32(v)) => *v as u64,
             Some(mongodb::bson::Bson::Double(v)) => *v as u64,
             _ => 5_000_000,
         };
-
         let max_m0_capacity: u64 = 512 * 1024 * 1024;
         Ok((total_size, max_m0_capacity))
     }
 
-    // =========================================================================
-    // CORE BINARY BLOB
-    // =========================================================================
     pub async fn fetch_core_blob(&self) -> Result<CoreBlobDocument> {
         let coll: Collection<CoreBlobDocument> = self.db.collection("system_core_blob");
         coll.find_one(doc! {})
@@ -101,93 +93,31 @@ impl DatabaseEngine {
     }
 
     // =========================================================================
-    // WHITELISTED USERS & IMAGES (OPERATIONAL OVERRIDES)
+    // IN-MEMORY dHash MIRROR DATA PROVIDER (Zero remote cursor scans!)
     // =========================================================================
-    pub async fn add_whitelisted_user(
-        &self,
-        identifier: &str,
-        added_by: &str,
-        reason: &str,
-    ) -> Result<()> {
-        let coll: Collection<WhitelistedUser> = self.db.collection("whitelisted_users");
-        coll.delete_many(doc! { "identifier": identifier.to_lowercase() })
-            .await?;
-        coll.insert_one(WhitelistedUser {
-            identifier: identifier.to_lowercase(),
-            added_by: added_by.to_string(),
-            reason: reason.to_string(),
-            created_at: BsonDateTime::now(),
-        })
-        .await?;
-        Ok(())
-    }
-
-    pub async fn remove_whitelisted_user(&self, identifier: &str) -> Result<()> {
-        let coll: Collection<Document> = self.db.collection("whitelisted_users");
-        coll.delete_many(doc! { "identifier": identifier.to_lowercase() })
-            .await?;
-        Ok(())
-    }
-
-    pub async fn fetch_whitelisted_users(&self) -> Result<Vec<WhitelistedUser>> {
-        let coll: Collection<WhitelistedUser> = self.db.collection("whitelisted_users");
+    pub async fn fetch_all_dhashes(&self) -> Result<Vec<u64>> {
+        let coll: Collection<Document> = self.db.collection("image_signatures");
         let mut cursor = coll.find(doc! {}).await?;
-        let mut users = Vec::new();
+        let mut dhashes = Vec::new();
+
         while cursor.advance().await? {
-            users.push(cursor.deserialize_current()?);
+            let doc = cursor.deserialize_current()?;
+            if let Ok(dhash_i64) = doc.get_i64("dhash") {
+                let dhash = dhash_i64 as u64;
+                if dhash != 0 {
+                    dhashes.push(dhash);
+                }
+            }
         }
-        Ok(users)
+        Ok(dhashes)
     }
 
-    pub async fn add_whitelisted_image(
-        &self,
-        sha256: &str,
-        label: &str,
-        added_by: &str,
-    ) -> Result<()> {
-        // 1. Remove from blacklist if present
-        let sig_coll: Collection<Document> = self.db.collection("image_signatures");
-        sig_coll.delete_many(doc! { "sha256": sha256 }).await?;
-
-        // 2. Insert into whitelist
-        let wl_coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
-        wl_coll.delete_many(doc! { "sha256": sha256 }).await?;
-        wl_coll
-            .insert_one(WhitelistedImage {
-                sha256: sha256.to_string(),
-                label: label.to_string(),
-                added_by: added_by.to_string(),
-                created_at: BsonDateTime::now(),
-            })
-            .await?;
-        Ok(())
-    }
-
-    pub async fn remove_whitelisted_image(&self, sha256: &str) -> Result<()> {
-        let coll: Collection<Document> = self.db.collection("whitelisted_images");
-        coll.delete_many(doc! { "sha256": sha256 }).await?;
-        Ok(())
-    }
-
-    pub async fn fetch_whitelisted_images(&self) -> Result<Vec<WhitelistedImage>> {
-        let coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
-        let mut cursor = coll.find(doc! {}).await?;
-        let mut images = Vec::new();
-        while cursor.advance().await? {
-            images.push(cursor.deserialize_current()?);
-        }
-        Ok(images)
-    }
-
-    // =========================================================================
-    // IMAGE BLACKLIST
-    // =========================================================================
     pub async fn record_banned_image(&self, sha256: &str, dhash: u64, user_id: u64) -> Result<()> {
         let coll: Collection<Document> = self.db.collection("image_signatures");
         coll.insert_one(doc! {
             "sha256": sha256,
             "dhash": dhash as i64,
-            "label": "Auto-Flagged NSFW / Raid Media",
+            "label": "Auto-Flagged NSFW Media",
             "banned_from_user": user_id as i64,
             "recorded_at": BsonDateTime::now()
         })
@@ -241,9 +171,82 @@ impl DatabaseEngine {
         Ok(docs)
     }
 
-    // =========================================================================
-    // DYNAMIC RULES
-    // =========================================================================
+    // Whitelists CRUD
+    pub async fn add_whitelisted_user(
+        &self,
+        identifier: &str,
+        added_by: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let coll: Collection<WhitelistedUser> = self.db.collection("whitelisted_users");
+        coll.delete_many(doc! { "identifier": identifier.to_lowercase() })
+            .await?;
+        coll.insert_one(WhitelistedUser {
+            identifier: identifier.to_lowercase(),
+            added_by: added_by.to_string(),
+            reason: reason.to_string(),
+            created_at: BsonDateTime::now(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_whitelisted_user(&self, identifier: &str) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("whitelisted_users");
+        coll.delete_many(doc! { "identifier": identifier.to_lowercase() })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn fetch_whitelisted_users(&self) -> Result<Vec<WhitelistedUser>> {
+        let coll: Collection<WhitelistedUser> = self.db.collection("whitelisted_users");
+        let mut cursor = coll.find(doc! {}).await?;
+        let mut users = Vec::new();
+        while cursor.advance().await? {
+            users.push(cursor.deserialize_current()?);
+        }
+        Ok(users)
+    }
+
+    pub async fn add_whitelisted_image(
+        &self,
+        sha256: &str,
+        label: &str,
+        added_by: &str,
+    ) -> Result<()> {
+        let sig_coll: Collection<Document> = self.db.collection("image_signatures");
+        sig_coll.delete_many(doc! { "sha256": sha256 }).await?;
+
+        let wl_coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
+        wl_coll.delete_many(doc! { "sha256": sha256 }).await?;
+        wl_coll
+            .insert_one(WhitelistedImage {
+                sha256: sha256.to_string(),
+                label: label.to_string(),
+                added_by: added_by.to_string(),
+                created_at: BsonDateTime::now(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_whitelisted_image(&self, sha256: &str) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("whitelisted_images");
+        coll.delete_many(doc! { "sha256": sha256 }).await?;
+        Ok(())
+    }
+
+    pub async fn fetch_whitelisted_images(&self) -> Result<Vec<WhitelistedImage>> {
+        let coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
+        let mut cursor = coll.find(doc! {}).await?;
+        let mut images = Vec::new();
+        while cursor.advance().await? {
+            images.push(cursor.deserialize_current()?);
+        }
+        Ok(images)
+    }
+
+    // Rules CRUD
     pub async fn fetch_dynamic_rules(&self) -> Result<Vec<DynamicRule>> {
         let coll: Collection<DynamicRule> = self.db.collection("dynamic_rules");
         let mut cursor = coll.find(doc! { "enabled": true }).await?;
@@ -266,9 +269,7 @@ impl DatabaseEngine {
         Ok(())
     }
 
-    // =========================================================================
-    // USER ACCOUNTS & RBAC
-    // =========================================================================
+    // Users CRUD
     pub async fn get_admin_user_count(&self) -> Result<u64> {
         let coll: Collection<Document> = self.db.collection("admin_users");
         let count = coll.count_documents(doc! {}).await?;
@@ -297,9 +298,6 @@ impl DatabaseEngine {
         Ok(users)
     }
 
-    // =========================================================================
-    // AUDIT LOGS
-    // =========================================================================
     pub async fn record_audit(&self, entry: AuditLogEntry) -> Result<()> {
         let coll: Collection<AuditLogEntry> = self.db.collection("moderation_audit_log");
         coll.insert_one(entry).await?;
@@ -320,13 +318,11 @@ impl DatabaseEngine {
         Ok(audits)
     }
 
-    // =========================================================================
-    // WASM PLUGINS
-    // =========================================================================
     pub async fn fetch_active_plugins(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let coll: Collection<Document> = self.db.collection("plugins");
         let mut cursor = coll.find(doc! { "enabled": true }).await?;
         let mut plugins = Vec::new();
+
         while cursor.advance().await? {
             let doc = cursor.deserialize_current()?;
             if let (Ok(name), Ok(bytes)) = (doc.get_str("name"), doc.get_binary_generic("bytecode"))
@@ -335,26 +331,5 @@ impl DatabaseEngine {
             }
         }
         Ok(plugins)
-    }
-
-    /// Check perceptual dHash against all blacklisted logos (Hamming distance <= 6)
-    pub async fn is_dhash_blacklisted(&self, target_dhash: u64) -> Result<bool> {
-        if target_dhash == 0 {
-            return Ok(false);
-        }
-
-        let coll: Collection<Document> = self.db.collection("image_signatures");
-        let mut cursor = coll.find(doc! {}).await?;
-
-        while cursor.advance().await? {
-            let doc = cursor.deserialize_current()?;
-            if let Ok(dhash_i64) = doc.get_i64("dhash") {
-                let dhash = dhash_i64 as u64;
-                if dhash != 0 && (dhash ^ target_dhash).count_ones() <= 6 {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
     }
 }

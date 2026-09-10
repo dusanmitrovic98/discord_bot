@@ -1,3 +1,4 @@
+use rand::RngCore;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -32,12 +33,16 @@ async fn main() {
     let db_arc = Arc::new(db);
     let reload_notifier = Arc::new(Notify::new());
 
+    // Generate 32-byte cryptographic secret for HMAC-SHA256 sessions
+    let mut session_secret = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut session_secret);
+
     let state = AppState {
         db: db_arc.clone(),
         reload_notifier: reload_notifier.clone(),
+        session_secret,
     };
 
-    // Bind Axum web router
     let port: u16 = env::var("PORT")
         .unwrap_or_else(|_| "10000".to_string())
         .parse()

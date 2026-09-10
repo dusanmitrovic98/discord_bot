@@ -1,6 +1,7 @@
 use serenity::prelude::*;
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info};
 
 use aegis_bastion::bot::{BotContainer, BotContainerKey, Handler};
@@ -16,7 +17,7 @@ async fn main() {
         )
         .init();
 
-    info!("Initializing Aegis Bastion Bot Core...");
+    info!("Initializing Aegis Bastion Bot Core (Full Overhaul)...");
 
     let token = env::var("DISCORD_TOKEN").expect("Fatal: DISCORD_TOKEN required");
     let mongo_uri =
@@ -34,6 +35,31 @@ async fn main() {
     )
     .await
     .expect("Fatal: BotContainer bootstrap failed");
+
+    // =========================================================================
+    // BACKGROUND DYNAMIC SYNCHRONIZER (Updates RAM rules every 5s with NO reboots!)
+    // =========================================================================
+    let sync_c = container.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            // 1. Sync Dynamic Regexes
+            if let Ok(rules) = sync_c.db.fetch_dynamic_rules().await {
+                let patterns: Vec<String> = rules.into_iter().map(|r| r.pattern).collect();
+                let _ = sync_c.gatekeeper.reload_dynamic_patterns(&patterns);
+            }
+
+            // 2. Sync Whitelist
+            let _ = sync_c.whitelist.sync_from_db(&sync_c.db).await;
+
+            // 3. Sync Blacklisted dHashes
+            if let Ok(dhashes) = sync_c.db.fetch_all_dhashes().await {
+                let mut guard = sync_c.blacklisted_dhashes.write().await;
+                *guard = dhashes;
+            }
+        }
+    });
 
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS

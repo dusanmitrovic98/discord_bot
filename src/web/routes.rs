@@ -10,8 +10,8 @@ use tracing::info;
 use crate::crypto::CryptoEngine;
 use crate::db::{AdminUser, DynamicRule};
 use crate::web::auth::{
-    clear_auth_cookie, create_auth_cookie, hash_password, parse_session_cookie, verify_password,
-    AuthPayload, AuthStatusResponse, UserDto,
+    clear_auth_cookie, create_signed_session_cookie, hash_password, verify_password,
+    verify_session_cookie, AuthPayload, AuthStatusResponse, UserDto,
 };
 use crate::web::AppState;
 
@@ -39,7 +39,7 @@ pub async fn auth_status(
     let mut authenticated = false;
     let mut user = None;
 
-    if let Some(user_val) = parse_session_cookie(&headers) {
+    if let Some(user_val) = verify_session_cookie(&headers, &state.session_secret) {
         if let Ok(Some(db_user)) = state.db.fetch_user(&user_val).await {
             authenticated = true;
             user = Some(UserDto {
@@ -71,12 +71,12 @@ pub async fn auth_submit(
         };
         let _ = state.db.create_admin_user(admin).await;
         info!("👑 Master Admin initialized: {}", payload.username);
-        return create_auth_cookie(&payload.username);
+        return create_signed_session_cookie(&payload.username, &state.session_secret);
     }
 
     if let Ok(Some(user)) = state.db.fetch_user(&payload.username).await {
         if verify_password(&payload.password, &user.password_hash) {
-            return create_auth_cookie(&payload.username);
+            return create_signed_session_cookie(&payload.username, &state.session_secret);
         }
     }
     (StatusCode::UNAUTHORIZED, "Invalid credentials").into_response()
@@ -124,13 +124,11 @@ pub async fn add_rule(
         created_at: mongodb::bson::DateTime::now(),
     };
     let _ = state.db.add_dynamic_rule(rule).await;
-    state.reload_notifier.notify_one();
     (StatusCode::CREATED, "Rule added").into_response()
 }
 
 pub async fn delete_rule(State(state): State<AppState>, Query(q): Query<QueryPattern>) -> Response {
     let _ = state.db.delete_dynamic_rule(&q.pattern).await;
-    state.reload_notifier.notify_one();
     StatusCode::OK.into_response()
 }
 
@@ -160,7 +158,6 @@ pub async fn add_whitelisted_user(
         .db
         .add_whitelisted_user(&payload.identifier, "Console", &payload.reason)
         .await;
-    state.reload_notifier.notify_one();
     StatusCode::CREATED.into_response()
 }
 
@@ -169,7 +166,6 @@ pub async fn delete_whitelisted_user(
     Query(q): Query<QueryIdentifier>,
 ) -> Response {
     let _ = state.db.remove_whitelisted_user(&q.identifier).await;
-    state.reload_notifier.notify_one();
     StatusCode::OK.into_response()
 }
 
@@ -208,7 +204,6 @@ pub async fn add_whitelisted_image(
                 .db
                 .add_whitelisted_image(&sha256, &payload.label, "Console")
                 .await;
-            state.reload_notifier.notify_one();
             return StatusCode::CREATED.into_response();
         }
     }
@@ -220,7 +215,6 @@ pub async fn delete_whitelisted_image(
     Query(q): Query<QuerySha>,
 ) -> Response {
     let _ = state.db.remove_whitelisted_image(&q.sha256).await;
-    state.reload_notifier.notify_one();
     StatusCode::OK.into_response()
 }
 
@@ -260,7 +254,7 @@ pub async fn blacklist_image(
             return StatusCode::CREATED.into_response();
         }
     }
-    (StatusCode::BAD_REQUEST, "Failed fetching image").into_response()
+    (StatusCode::BAD_REQUEST, "Failed fetching image from URL").into_response()
 }
 
 pub async fn revoke_image(State(state): State<AppState>, Query(q): Query<QuerySha>) -> Response {

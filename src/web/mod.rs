@@ -12,6 +12,7 @@ use crate::db::DatabaseEngine;
 pub struct AppState {
     pub db: Arc<DatabaseEngine>,
     pub reload_notifier: Arc<Notify>,
+    pub session_secret: [u8; 32],
 }
 
 pub fn build_web_router(state: AppState) -> Router {

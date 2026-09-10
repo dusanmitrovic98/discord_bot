@@ -12,6 +12,7 @@ use serenity::model::guild::{Guild, Member};
 use serenity::model::id::{GuildId, UserId};
 use serenity::prelude::*;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::config::GuildConfig;
@@ -35,6 +36,7 @@ pub struct BotContainer {
     pub media_inspector: Arc<MediaInspector>,
     pub scan_queue: Arc<BoundedScanQueue>,
     pub plugin_engine: Arc<DynamicPluginEngine>,
+    pub blacklisted_dhashes: Arc<RwLock<Vec<u64>>>, // In-Memory dHash Mirror (<2μs checks)
 }
 
 impl BotContainer {
@@ -51,6 +53,10 @@ impl BotContainer {
 
         let whitelist = Arc::new(WhitelistRegistry::new());
         let _ = whitelist.sync_from_db(&db).await;
+
+        // Populate in-memory dHash cache on boot (eliminates remote O(N) database cursor)
+        let dhashes = db.fetch_all_dhashes().await.unwrap_or_default();
+        let blacklisted_dhashes = Arc::new(RwLock::new(dhashes));
 
         let http_client = reqwest::Client::new();
         let media_inspector = Arc::new(MediaInspector::new(
@@ -75,6 +81,7 @@ impl BotContainer {
             media_inspector,
             scan_queue,
             plugin_engine,
+            blacklisted_dhashes,
         }))
     }
 }
@@ -230,10 +237,7 @@ impl EventHandler for Handler {
     }
 }
 
-// =============================================================================
-// SUBROUTINE GUARDS & HELPERS (NASA Rule 1 & 4)
-// =============================================================================
-
+// Subroutines
 async fn get_container(ctx: &Context) -> Arc<BotContainer> {
     ctx.data
         .read()
@@ -345,17 +349,7 @@ async fn handle_join_avatar(
     url: &str,
     payload: MediaPayload,
 ) {
-    match triage_media(
-        &payload,
-        user_id,
-        guild_id,
-        url.to_string(),
-        &c.whitelist,
-        &c.db,
-        &c.scan_queue,
-    )
-    .await
-    {
+    match triage_media(c, &payload, user_id, guild_id, url.to_string()).await {
         Ok(MediaVerdict::BlacklistedNSFW) => {
             tokio::spawn(purge_welcome_channel_on_nsfw_join(
                 ctx.http.clone(),
@@ -383,6 +377,7 @@ async fn handle_join_avatar(
             let ctx_c = ctx.clone();
             let cfg = c.config.clone();
             let db = c.db.clone();
+            let dhash_cache = c.blacklisted_dhashes.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(resp)) = rx.await {
                     if resp.confidence.nsfw >= cfg.nsfw_auto_delete_threshold {
@@ -393,6 +388,9 @@ async fn handle_join_avatar(
                         let _ = db
                             .record_banned_image(&payload.sha256, payload.dhash, user_id)
                             .await;
+                        if payload.dhash != 0 {
+                            dhash_cache.write().await.push(payload.dhash);
+                        }
                         send_mod_alert(
                             &ctx_c,
                             &cfg,
@@ -448,13 +446,11 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
             let author_id = msg.author.id.get();
 
             match triage_media(
+                c,
                 &payload,
                 author_id,
                 c.config.authorized_guild_id,
                 url.clone(),
-                &c.whitelist,
-                &c.db,
-                &c.scan_queue,
             )
             .await
             {
@@ -483,12 +479,16 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
                     let ctx_c = ctx.clone();
                     let cfg = c.config.clone();
                     let db = c.db.clone();
+                    let dhash_cache = c.blacklisted_dhashes.clone();
                     tokio::spawn(async move {
                         if let Ok(Ok(resp)) = rx.await {
                             if resp.confidence.nsfw >= cfg.nsfw_auto_delete_threshold {
                                 let _ = db
                                     .record_banned_image(&payload.sha256, payload.dhash, author_id)
                                     .await;
+                                if payload.dhash != 0 {
+                                    dhash_cache.write().await.push(payload.dhash);
+                                }
                                 let _ = ch_id.delete_message(&ctx_c.http, msg_id).await;
                                 send_mod_alert(
                                     &ctx_c,
@@ -520,10 +520,7 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
     }
 }
 
-// =============================================================================
-// MODULAR SLASH COMMAND ROUTER & HANDLERS (NASA Rule 1 & 4)
-// =============================================================================
-
+// Slash commands router
 async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInteraction) {
     let caller_id = cmd.user.id.get();
     let roles: Vec<u64> = cmd

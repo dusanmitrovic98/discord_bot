@@ -29,7 +29,7 @@ impl MemoryExecutable {
             let mut file = File::from_raw_fd(fd);
             file.write_all(binary_data)?;
             file.flush()?;
-            let _ = file.into_raw_fd(); // Prevent Drop from closing fd
+            let _ = file.into_raw_fd();
 
             if libc::fchmod(fd, 0o755) < 0 {
                 libc::close(fd);
@@ -95,18 +95,17 @@ impl SupervisorWatchdog {
         }
     }
 
-    /// Pure watchdog probe: Polls child health over duration (NASA Rule 4)
     fn probe_child_health(child: &mut Child, timeout: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < timeout {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    error!("Child crashed prematurely with exit status: {}", status);
+                    error!("Child crashed prematurely with status: {}", status);
                     return false;
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    error!("Error monitoring child process: {}", e);
+                    error!("Error monitoring child: {}", e);
                     return false;
                 }
             }
@@ -115,11 +114,10 @@ impl SupervisorWatchdog {
         true
     }
 
-    /// Re-spawns the Last Known Good cached binary upon failure
     fn rollback_to_lkg(&mut self) -> Result<()> {
         warn!("Watchdog triggered rollback to Last Known Good binary!");
         let lkg = self.lkg_blob.as_ref().ok_or_else(|| {
-            AegisError::SupervisorError("Fatal: New version crashed and no LKG available".into())
+            AegisError::SupervisorError("Fatal: New version crashed, no LKG available".into())
         })?;
 
         let fallback = MemoryExecutable::create_sealed("aegis_core_lkg", lkg)?;
@@ -129,17 +127,41 @@ impl SupervisorWatchdog {
         ))
     }
 
-    /// Gracefully reaps an existing child process
-    fn reap_child(mut old_child: Child) {
-        info!(
-            "Terminating previous core process (PID: {})...",
-            old_child.id()
-        );
-        let _ = old_child.kill();
-        let _ = old_child.wait();
+    /// Cooperative SIGTERM Graceful Shutdown with SIGKILL fallback (NASA Rule 7)
+    fn reap_child_gracefully(mut old_child: Child) {
+        let pid = old_child.id() as i32;
+        info!("Sending SIGTERM to previous core process (PID: {})...", pid);
+
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let _ = libc::kill(pid, libc::SIGTERM);
+        }
+
+        // Grant 3 seconds for clean DB flush and WebSocket closure
+        let start = Instant::now();
+        let timeout = Duration::from_secs(3);
+        let mut exited = false;
+
+        while start.elapsed() < timeout {
+            if let Ok(Some(_)) = old_child.try_wait() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        if !exited {
+            warn!(
+                "Process PID {} did not exit within 3s. Issuing fallback SIGKILL.",
+                pid
+            );
+            let _ = old_child.kill();
+            let _ = old_child.wait();
+        } else {
+            info!("Process PID {} terminated gracefully.", pid);
+        }
     }
 
-    /// Linear, readable hot-swap state machine (<20 lines, NASA Rule 1)
     pub fn hot_swap_core(&mut self, new_binary: Vec<u8>) -> Result<()> {
         info!("Initiating in-memory core swap...");
 
@@ -151,7 +173,7 @@ impl SupervisorWatchdog {
         }
 
         if let Some(old_child) = self.current_child.take() {
-            Self::reap_child(old_child);
+            Self::reap_child_gracefully(old_child);
         }
 
         self.lkg_blob = Some(new_binary);
