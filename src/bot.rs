@@ -58,7 +58,7 @@ impl EventHandler for Handler {
         }
     }
 
-    /// On Member Join: Evaluates joining member; bans hardcoded predators and purges Sapphire welcome cards
+    /// On Member Join: Evaluates all 3 name vectors and avatar, bans predators, purges Sapphire welcome cards
     async fn guild_member_addition(&self, ctx: Context, member: Member) {
         if member.guild_id.get() != AUTHORIZED_GUILD_ID {
             return;
@@ -71,52 +71,66 @@ impl EventHandler for Handler {
                 .clone()
         };
 
-        let username = &member.user.name;
-        let display_name = member.display_name().to_string();
         let user_id = member.user.id.get();
         let guild_id = member.guild_id;
 
-        info!("👤 [JOIN EVENT] Inspecting: {} (ID: {})", username, user_id);
+        // 3-Vector Name Inspection on Join
+        let username = &member.user.name;
+        let global_name = member.user.global_name.as_deref().unwrap_or("");
+        let nickname = member.nick.as_deref().unwrap_or("");
 
-        // 1. Two-Tier Threat Gatekeeper on Join Names
-        let verdict_user = container.gatekeeper.evaluate_threat(username);
-        let verdict_display = container.gatekeeper.evaluate_threat(&display_name);
+        info!(
+            "👤 [JOIN EVENT] Inspecting: user='{}' global='{}' nick='{}' (ID: {})",
+            username, global_name, nickname, user_id
+        );
 
-        let highest_verdict = match (verdict_user, verdict_display) {
-            (ThreatVerdict::InstantBan, _) | (_, ThreatVerdict::InstantBan) => {
-                ThreatVerdict::InstantBan
-            }
-            (ThreatVerdict::DeleteOnly, _) | (_, ThreatVerdict::DeleteOnly) => {
-                ThreatVerdict::DeleteOnly
-            }
-            _ => ThreatVerdict::Safe,
-        };
+        let v_user = container.gatekeeper.evaluate_threat(username);
+        let v_glob = container.gatekeeper.evaluate_threat(global_name);
+        let v_nick = container.gatekeeper.evaluate_threat(nickname);
+
+        let highest_verdict = [v_user, v_glob, v_nick]
+            .into_iter()
+            .max_by_key(|v| match v {
+                ThreatVerdict::InstantBan => 2,
+                ThreatVerdict::DeleteOnly => 1,
+                ThreatVerdict::Safe => 0,
+            })
+            .unwrap_or(ThreatVerdict::Safe);
 
         match highest_verdict {
             ThreatVerdict::InstantBan => {
+                let offending_name = if v_nick == ThreatVerdict::InstantBan {
+                    nickname
+                } else if v_glob == ThreatVerdict::InstantBan {
+                    global_name
+                } else {
+                    username
+                };
+
                 warn!(
-                    "🚨 [GATEKEEPER] PREDATORY USERNAME DETECTED: {} ({}). Eradicating account.",
-                    username, user_id
+                    "🚨 [GATEKEEPER] PREDATORY USERNAME DETECTED ON JOIN: '{}' (ID: {}). Eradicating account.",
+                    offending_name, user_id
                 );
 
-                // Sweep Sapphire welcome card
+                // Actively sweep and purge Sapphire's welcome message from #welcome
                 tokio::spawn(purge_welcome_channel_on_nsfw_join(ctx.http.clone()));
 
                 execute_ban(
                     &ctx.http,
                     guild_id,
                     user_id,
-                    "Zero-Tolerance Predatory Username Match",
+                    &format!("Zero-Tolerance Predatory Name Match: {}", offending_name),
                     1.0,
                     &container.db,
                 )
                 .await;
+
                 send_mod_alert(
                     &ctx,
-                    "Predatory Username Banned",
+                    "Predatory User Banned on Join",
                     &format!(
-                        "User <@{}> was banned for predatory username `{}`",
-                        user_id, username
+                        "User <@{}> was banned on join for predatory name `{}`",
+                        user_id, offending_name
                     ),
                     user_id,
                 )
@@ -124,16 +138,24 @@ impl EventHandler for Handler {
                 return;
             }
             ThreatVerdict::DeleteOnly => {
+                let offending_name = if v_nick == ThreatVerdict::DeleteOnly {
+                    nickname
+                } else if v_glob == ThreatVerdict::DeleteOnly {
+                    global_name
+                } else {
+                    username
+                };
+
                 warn!(
-                    "⚠️ [SOFT NAME POLICY] User {} joined with soft-flagged name (contains restricted word). User NOT banned.",
-                    user_id
+                    "⚠️ [SOFT NAME POLICY] User {} joined with soft-flagged name '{}' (contains restricted keyword). User NOT banned.",
+                    user_id, offending_name
                 );
                 send_mod_alert(
                     &ctx,
                     "Soft Name Policy Notice",
                     &format!(
-                        "User <@{}> joined with username `{}` matching a soft policy rule. No ban issued.",
-                        user_id, username
+                        "User <@{}> joined with name/handle `{}` matching a soft dynamic policy rule (e.g. 'link'). No ban issued.",
+                        user_id, offending_name
                     ),
                     user_id,
                 )
@@ -158,6 +180,7 @@ impl EventHandler for Handler {
                         user_id
                     );
 
+                    // Sweep Sapphire welcome card from welcome channel
                     tokio::spawn(purge_welcome_channel_on_nsfw_join(ctx.http.clone()));
 
                     send_mod_alert(
@@ -207,6 +230,7 @@ impl EventHandler for Handler {
                                     resp.confidence.nsfw
                                 );
 
+                                // Sweep Sapphire's welcome card
                                 tokio::spawn(purge_welcome_channel_on_nsfw_join(
                                     ctx_clone.http.clone(),
                                 ));
@@ -238,7 +262,7 @@ impl EventHandler for Handler {
         }
     }
 
-    /// On Message: Evaluates diagnostics, author names, author PFPs, attachments, and embeds
+    /// On Message: Evaluates diagnostics, 3 name vectors, author PFPs, attachments, and embeds
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.id == ctx.cache.current_user().id {
             return;
@@ -367,40 +391,41 @@ impl EventHandler for Handler {
         );
 
         // =========================================================================
-        // 1. TWO-TIER NAME GATEKEEPER: Hardcoded = BAN | Dynamic 'link' = DELETE ONLY
+        // 1. THREE-VECTOR NAME GATEKEEPER: Checks Username, Global Display Name, and Server Nickname
         // =========================================================================
         let username = &msg.author.name;
+        let global_name = msg.author.global_name.as_deref().unwrap_or("");
         let nickname = msg
             .member
             .as_ref()
             .and_then(|m| m.nick.as_deref())
             .unwrap_or("");
 
-        let verdict_user = container.gatekeeper.evaluate_threat(username);
-        let verdict_nick = container.gatekeeper.evaluate_threat(nickname);
+        let v_user = container.gatekeeper.evaluate_threat(username);
+        let v_glob = container.gatekeeper.evaluate_threat(global_name);
+        let v_nick = container.gatekeeper.evaluate_threat(nickname);
 
-        let highest_verdict = match (verdict_user, verdict_nick) {
-            (ThreatVerdict::InstantBan, _) | (_, ThreatVerdict::InstantBan) => {
-                ThreatVerdict::InstantBan
-            }
-            (ThreatVerdict::DeleteOnly, _) | (_, ThreatVerdict::DeleteOnly) => {
-                ThreatVerdict::DeleteOnly
-            }
-            _ => ThreatVerdict::Safe,
-        };
+        let highest_verdict = [v_user, v_glob, v_nick]
+            .into_iter()
+            .max_by_key(|v| match v {
+                ThreatVerdict::InstantBan => 2,
+                ThreatVerdict::DeleteOnly => 1,
+                ThreatVerdict::Safe => 0,
+            })
+            .unwrap_or(ThreatVerdict::Safe);
 
         match highest_verdict {
             ThreatVerdict::InstantBan => {
-                let offending_name = if container.gatekeeper.evaluate_threat(nickname)
-                    == ThreatVerdict::InstantBan
-                {
+                let offending_name = if v_nick == ThreatVerdict::InstantBan {
                     nickname
+                } else if v_glob == ThreatVerdict::InstantBan {
+                    global_name
                 } else {
                     username
                 };
 
                 warn!(
-                    "🚨 [GATEKEEPER] Banning sender {} for predatory name/nick: '{}'.",
+                    "🚨 [GATEKEEPER] Banning sender {} for predatory name: '{}'.",
                     author_id, offending_name
                 );
                 let _ = msg.delete(&ctx.http).await;
@@ -418,7 +443,7 @@ impl EventHandler for Handler {
                         &ctx,
                         "Predatory User Banned on Message",
                         &format!(
-                            "Banned <@{}> for predatory name/nick `{}`",
+                            "Banned <@{}> for predatory name `{}`",
                             author_id, offending_name
                         ),
                         author_id,
@@ -428,10 +453,10 @@ impl EventHandler for Handler {
                 return;
             }
             ThreatVerdict::DeleteOnly => {
-                let offending_name = if container.gatekeeper.evaluate_threat(nickname)
-                    == ThreatVerdict::DeleteOnly
-                {
+                let offending_name = if v_nick == ThreatVerdict::DeleteOnly {
                     nickname
+                } else if v_glob == ThreatVerdict::DeleteOnly {
+                    global_name
                 } else {
                     username
                 };
@@ -445,7 +470,7 @@ impl EventHandler for Handler {
                     &ctx,
                     "Message Deleted (Soft Name Policy)",
                     &format!(
-                        "Deleted message from <@{}> because their name/nickname (`{}`) contains a restricted keyword. User was not banned.",
+                        "Deleted message from <@{}> because their display name or handle (`{}`) contains a restricted keyword. User was not banned.",
                         author_id, offending_name
                     ),
                     author_id,
@@ -636,21 +661,33 @@ async fn purge_welcome_channel_on_nsfw_join(http: Arc<serenity::http::Http>) {
                     if (now - msg_time).abs() < 60
                         && (msg.author.bot || msg.author.id.get() == 678344927997853742)
                     {
-                        warn!("🚨 [PURGE] Found recent welcome message from {} (ID: {}). Deleting on attempt {}...", msg.author.name, msg.id, attempt);
+                        warn!(
+                            "🚨 [PURGE] Found recent welcome message from {} (ID: {}). Deleting on attempt {}...",
+                            msg.author.name, msg.id, attempt
+                        );
                         match channel.delete_message(&http, msg.id).await {
                             Ok(()) => {
-                                info!("✅ [SWEEPER SUCCESS] Deleted welcome card from #welcome on attempt {}!", attempt);
+                                info!(
+                                    "✅ [SWEEPER SUCCESS] Deleted welcome card from #welcome on attempt {}!",
+                                    attempt
+                                );
                                 return;
                             }
                             Err(e) => {
-                                error!("❌ CRITICAL DISCORD ERROR: Failed to delete message in #welcome: {}. Check 'Manage Messages' permission!", e);
+                                error!(
+                                    "❌ CRITICAL DISCORD ERROR: Failed to delete message in #welcome: {}. Check 'Manage Messages' permission!",
+                                    e
+                                );
                             }
                         }
                     }
                 }
             }
             Err(e) => {
-                error!("❌ FAILED FETCHING #welcome messages: {}. Check 'Read Message History' permission!", e);
+                error!(
+                    "❌ FAILED FETCHING #welcome messages: {}. Check 'Read Message History' permission!",
+                    e
+                );
             }
         }
     }
