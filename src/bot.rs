@@ -20,8 +20,9 @@ use crate::pipeline::media_guard::{triage_media, MediaVerdict};
 use crate::pipeline::name_guard::evaluate_member_names;
 use crate::pipeline::sweeper::purge_welcome_channel_on_nsfw_join;
 use crate::plugin_engine::DynamicPluginEngine;
-use crate::queue::BoundedScanQueue;
+use crate::queue::{BoundedScanQueue, ResilientClassifierClient};
 use crate::whitelist::WhitelistRegistry;
+use crate::Result;
 
 pub struct BotContainer {
     pub config: Arc<GuildConfig>,
@@ -33,18 +34,70 @@ pub struct BotContainer {
     pub plugin_engine: Arc<DynamicPluginEngine>,
 }
 
+impl BotContainer {
+    /// Factory Bootstrap Method (Eliminates 70 lines of procedural noise in main)
+    pub async fn bootstrap(
+        db: Arc<DatabaseEngine>,
+        config: Arc<GuildConfig>,
+        classifier_url: String,
+    ) -> Result<Arc<Self>> {
+        // 1. Sync Gatekeeper dynamic rules
+        let gatekeeper = Arc::new(TextGatekeeper::new());
+        if let Ok(rules) = db.fetch_dynamic_rules().await {
+            let patterns: Vec<String> = rules.into_iter().map(|r| r.pattern).collect();
+            let _ = gatekeeper.reload_dynamic_patterns(&patterns);
+        }
+
+        // 2. Sync Whitelist registry
+        let whitelist = Arc::new(WhitelistRegistry::new());
+        let _ = whitelist.sync_from_db(&db).await;
+
+        // 3. Media Inspector & AI Queue
+        let http_client = reqwest::Client::new();
+        let media_inspector = Arc::new(MediaInspector::new(
+            http_client.clone(),
+            config.max_download_size_bytes,
+        ));
+        let classifier_client = Arc::new(ResilientClassifierClient::new(classifier_url));
+        let scan_queue = Arc::new(BoundedScanQueue::new(500, classifier_client));
+
+        // 4. WASM Plugin Engine Sync
+        let plugin_engine = Arc::new(DynamicPluginEngine::new());
+        if let Ok(plugins) = db.fetch_active_plugins().await {
+            for (name, bytecode) in plugins {
+                let _ = plugin_engine.hot_swap_plugin(&name, &bytecode);
+            }
+        }
+
+        Ok(Arc::new(Self {
+            config,
+            gatekeeper,
+            db,
+            whitelist,
+            media_inspector,
+            scan_queue,
+            plugin_engine,
+        }))
+    }
+}
+
+pub struct BotContainerKey;
+impl TypeMapKey for BotContainerKey {
+    type Value = Arc<BotContainer>;
+}
+
 pub struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
-        let container = get_container(&ctx).await;
+        let c = get_container(&ctx).await;
         info!(
             "Sebastian The Butler is Online. Operating for Guild: {}",
-            container.config.authorized_guild_id
+            c.config.authorized_guild_id
         );
 
-        let guild_id = GuildId::new(container.config.authorized_guild_id);
+        let guild_id = GuildId::new(c.config.authorized_guild_id);
         let commands = vec![
             CreateCommand::new("test-name")
                 .description("Evaluate any username against Gatekeeper")
@@ -85,8 +138,8 @@ impl EventHandler for Handler {
     }
 
     async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
-        let container = get_container(&ctx).await;
-        if !container.config.is_authorized_guild(guild.id.get()) {
+        let c = get_container(&ctx).await;
+        if !c.config.is_authorized_guild(guild.id.get()) {
             warn!(
                 "🚨 Evicting from unauthorized guild: {} ({})",
                 guild.name, guild.id
@@ -121,7 +174,7 @@ impl EventHandler for Handler {
                 &ctx.http,
                 member.guild_id,
                 user_id,
-                &format!("Predatory Name Match: {}", eval.offending_name),
+                &format!("Predatory Name: {}", eval.offending_name),
                 1.0,
                 &c.db,
                 &c.config,
@@ -138,7 +191,6 @@ impl EventHandler for Handler {
             return;
         }
 
-        // Avatar inspection on join
         if let Some(avatar_url) = member.user.avatar_url() {
             if let Ok(payload) = c.media_inspector.inspect_url(&avatar_url).await {
                 handle_join_avatar(
@@ -154,6 +206,7 @@ impl EventHandler for Handler {
         }
     }
 
+    /// Linearized, readable message handler (<35 lines, NASA Rule 1)
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.id == ctx.cache.current_user().id {
             return;
@@ -163,96 +216,17 @@ impl EventHandler for Handler {
             return;
         }
 
-        let author_id = msg.author.id.get();
-        let eval = evaluate_member_names(
-            &c.gatekeeper,
-            &c.whitelist,
-            author_id,
-            &msg.author.name,
-            msg.author.global_name.as_deref().unwrap_or(""),
-            msg.member
-                .as_ref()
-                .and_then(|m| m.nick.as_deref())
-                .unwrap_or(""),
-        )
-        .await;
-
-        match eval.verdict {
-            ThreatVerdict::InstantBan => {
-                let _ = msg.delete(&ctx.http).await;
-                if let Some(gid) = msg.guild_id {
-                    execute_ban(
-                        &ctx.http,
-                        gid,
-                        author_id,
-                        &format!("Predatory Name: {}", eval.offending_name),
-                        1.0,
-                        &c.db,
-                        &c.config,
-                    )
-                    .await;
-                    send_mod_alert(
-                        &ctx,
-                        &c.config,
-                        "Predatory User Banned",
-                        &format!("Banned <@{}>", author_id),
-                        author_id,
-                    )
-                    .await;
-                }
-                return;
-            }
-            ThreatVerdict::DeleteOnly => {
-                let _ = msg.delete(&ctx.http).await;
-                send_mod_alert(
-                    &ctx,
-                    &c.config,
-                    "Message Purged (Soft Rule)",
-                    &format!(
-                        "Purged message from <@{}> for name `{}`",
-                        author_id, eval.offending_name
-                    ),
-                    author_id,
-                )
-                .await;
-                return;
-            }
-            ThreatVerdict::Safe => {}
+        // Guard 1: Name threat evaluation
+        if guard_author_names(&ctx, &c, &msg).await {
+            return;
         }
 
-        // Author PFP Check
-        if let Some(avatar_url) = msg.author.avatar_url() {
-            if let Ok(payload) = c.media_inspector.inspect_url(&avatar_url).await {
-                if !c.whitelist.is_image_safe(&payload.sha256).await
-                    && c.db
-                        .is_image_blacklisted(&payload.sha256)
-                        .await
-                        .unwrap_or(false)
-                {
-                    let _ = msg.delete(&ctx.http).await;
-                    send_mod_alert(
-                        &ctx,
-                        &c.config,
-                        "Message Blocked (NSFW Avatar)",
-                        &format!("Blocked <@{}> (holds adult avatar)", author_id),
-                        author_id,
-                    )
-                    .await;
-                    send_logs_evidence(
-                        &ctx,
-                        &c.config,
-                        "Blocked NSFW Avatar",
-                        &format!("User <@{}> avatar is blacklisted", author_id),
-                        author_id,
-                        payload.bytes,
-                    )
-                    .await;
-                    return;
-                }
-            }
+        // Guard 2: Author profile picture check
+        if guard_author_pfp(&ctx, &c, &msg).await {
+            return;
         }
 
-        // Message Attachments & Embeds
+        // Guard 3: Message media streams (attachments and embeds)
         inspect_message_media(&ctx, &c, &msg).await;
     }
 
@@ -264,10 +238,9 @@ impl EventHandler for Handler {
     }
 }
 
-pub struct BotContainerKey;
-impl TypeMapKey for BotContainerKey {
-    type Value = Arc<BotContainer>;
-}
+// =============================================================================
+// SUBROUTINE GUARDS (Single Responsibility, NASA Rule 4)
+// =============================================================================
 
 async fn get_container(ctx: &Context) -> Arc<BotContainer> {
     ctx.data
@@ -276,6 +249,100 @@ async fn get_container(ctx: &Context) -> Arc<BotContainer> {
         .get::<BotContainerKey>()
         .unwrap()
         .clone()
+}
+
+async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> bool {
+    let author_id = msg.author.id.get();
+    let eval = evaluate_member_names(
+        &c.gatekeeper,
+        &c.whitelist,
+        author_id,
+        &msg.author.name,
+        msg.author.global_name.as_deref().unwrap_or(""),
+        msg.member
+            .as_ref()
+            .and_then(|m| m.nick.as_deref())
+            .unwrap_or(""),
+    )
+    .await;
+
+    match eval.verdict {
+        ThreatVerdict::InstantBan => {
+            let _ = msg.delete(&ctx.http).await;
+            if let Some(gid) = msg.guild_id {
+                execute_ban(
+                    &ctx.http,
+                    gid,
+                    author_id,
+                    &format!("Predatory Name: {}", eval.offending_name),
+                    1.0,
+                    &c.db,
+                    &c.config,
+                )
+                .await;
+                send_mod_alert(
+                    ctx,
+                    &c.config,
+                    "Predatory User Banned",
+                    &format!("Banned <@{}>", author_id),
+                    author_id,
+                )
+                .await;
+            }
+            true
+        }
+        ThreatVerdict::DeleteOnly => {
+            let _ = msg.delete(&ctx.http).await;
+            send_mod_alert(
+                ctx,
+                &c.config,
+                "Message Purged (Soft Rule)",
+                &format!(
+                    "Purged message from <@{}> for name `{}`",
+                    author_id, eval.offending_name
+                ),
+                author_id,
+            )
+            .await;
+            true
+        }
+        ThreatVerdict::Safe => false,
+    }
+}
+
+async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> bool {
+    if let Some(avatar_url) = msg.author.avatar_url() {
+        if let Ok(payload) = c.media_inspector.inspect_url(&avatar_url).await {
+            if !c.whitelist.is_image_safe(&payload.sha256).await
+                && c.db
+                    .is_image_blacklisted(&payload.sha256)
+                    .await
+                    .unwrap_or(false)
+            {
+                let _ = msg.delete(&ctx.http).await;
+                let author_id = msg.author.id.get();
+                send_mod_alert(
+                    ctx,
+                    &c.config,
+                    "Message Blocked (NSFW Avatar)",
+                    &format!("Blocked <@{}> (holds adult avatar)", author_id),
+                    author_id,
+                )
+                .await;
+                send_logs_evidence(
+                    ctx,
+                    &c.config,
+                    "Blocked NSFW Avatar",
+                    &format!("User <@{}> avatar is blacklisted", author_id),
+                    author_id,
+                    payload.bytes,
+                )
+                .await;
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn handle_join_avatar(
