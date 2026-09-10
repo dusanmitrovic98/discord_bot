@@ -115,11 +115,20 @@ async fn exec_publish_plugin(client: &Client, file_path: &str, plugin_name: &str
     let wasm_bytes = fs::read(file_path)?;
     let sha256 = CryptoEngine::sha256(&wasm_bytes);
 
+    // Validate WASM and extract manifest automatically
+    let engine = aegis_bastion::plugin_engine::DynamicPluginEngine::new();
+    let manifest = engine
+        .hot_swap_plugin(plugin_name, &wasm_bytes)
+        .unwrap_or_default();
+    let manifest_json = serde_json::to_string(&manifest).unwrap_or_default();
+
     let coll = client
         .database("aegis_bastion")
         .collection::<Document>("plugins");
+    coll.delete_many(doc! { "name": plugin_name }).await?;
     coll.insert_one(doc! {
         "name": plugin_name,
+        "manifest_json": manifest_json,
         "bytecode": Binary { subtype: BinarySubtype::Generic, bytes: wasm_bytes },
         "sha256": sha256,
         "enabled": true,
@@ -128,8 +137,9 @@ async fn exec_publish_plugin(client: &Client, file_path: &str, plugin_name: &str
     .await?;
 
     println!(
-        "Plugin '{}' published to MongoDB Atlas successfully!",
-        plugin_name
+        "Plugin '{}' (Commands: {}) published to MongoDB Atlas successfully!",
+        plugin_name,
+        manifest.slash_commands.len()
     );
     Ok(())
 }
