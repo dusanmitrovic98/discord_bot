@@ -61,11 +61,18 @@ pub struct CoreBlobDocument {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PluginRecord {
     pub name: String,
+    #[serde(default)]
     pub manifest_json: String,
     pub bytecode: Binary,
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
     pub registered_command_ids: Vec<u64>,
     pub updated_at: BsonDateTime,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -355,14 +362,14 @@ impl DatabaseEngine {
     // COMMUNITY WASM PLUGINS REGISTRY
     // =========================================================================
     pub async fn save_plugin_record(&self, record: PluginRecord) -> Result<()> {
-        let coll: Collection<PluginRecord> = self.db.collection("plugins_v2");
+        let coll: Collection<PluginRecord> = self.db.collection("plugins");
         coll.delete_many(doc! { "name": &record.name }).await?;
         coll.insert_one(record).await?;
         Ok(())
     }
 
     pub async fn fetch_all_plugin_records(&self) -> Result<Vec<PluginRecord>> {
-        let coll: Collection<PluginRecord> = self.db.collection("plugins_v2");
+        let coll: Collection<PluginRecord> = self.db.collection("plugins");
         let mut cursor = coll.find(doc! {}).await?;
         let mut records = Vec::new();
         while cursor.advance().await? {
@@ -372,7 +379,7 @@ impl DatabaseEngine {
     }
 
     pub async fn toggle_plugin_record(&self, name: &str, enabled: bool) -> Result<()> {
-        let coll: Collection<Document> = self.db.collection("plugins_v2");
+        let coll: Collection<Document> = self.db.collection("plugins");
         coll.update_one(
             doc! { "name": name },
             doc! { "$set": { "enabled": enabled, "updated_at": BsonDateTime::now() } },
@@ -382,7 +389,7 @@ impl DatabaseEngine {
     }
 
     pub async fn delete_plugin_record(&self, name: &str) -> Result<()> {
-        let coll: Collection<Document> = self.db.collection("plugins_v2");
+        let coll: Collection<Document> = self.db.collection("plugins");
         coll.delete_many(doc! { "name": name }).await?;
         Ok(())
     }
