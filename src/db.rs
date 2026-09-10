@@ -336,4 +336,25 @@ impl DatabaseEngine {
         }
         Ok(plugins)
     }
+
+    /// Check perceptual dHash against all blacklisted logos (Hamming distance <= 6)
+    pub async fn is_dhash_blacklisted(&self, target_dhash: u64) -> Result<bool> {
+        if target_dhash == 0 {
+            return Ok(false);
+        }
+
+        let coll: Collection<Document> = self.db.collection("image_signatures");
+        let mut cursor = coll.find(doc! {}).await?;
+
+        while cursor.advance().await? {
+            let doc = cursor.deserialize_current()?;
+            if let Ok(dhash_i64) = doc.get_i64("dhash") {
+                let dhash = dhash_i64 as u64;
+                if dhash != 0 && (dhash ^ target_dhash).count_ones() <= 6 {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }

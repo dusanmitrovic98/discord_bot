@@ -22,6 +22,12 @@ pub struct DynamicPluginEngine {
     registry: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
+impl Default for DynamicPluginEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DynamicPluginEngine {
     pub fn new() -> Self {
         let mut config = Config::new();

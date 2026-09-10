@@ -1,14 +1,16 @@
 use serenity::prelude::*;
-use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 use tracing::{error, info};
 
 use aegis_bastion::bot::{BotContainer, BotContainerKey, Handler};
+use aegis_bastion::config::GuildConfig;
 use aegis_bastion::db::DatabaseEngine;
 use aegis_bastion::gatekeeper::TextGatekeeper;
+use aegis_bastion::media::MediaInspector;
 use aegis_bastion::plugin_engine::DynamicPluginEngine;
 use aegis_bastion::queue::{BoundedScanQueue, ResilientClassifierClient};
+use aegis_bastion::whitelist::WhitelistRegistry;
 
 #[tokio::main]
 async fn main() {
@@ -19,8 +21,9 @@ async fn main() {
         )
         .init();
 
-    info!("Initializing Aegis Bastion Bot Core...");
+    info!("Initializing Aegis Bastion Bot Core (Refactored Pipeline)...");
 
+    let config = Arc::new(GuildConfig::default());
     let discord_token = env::var("DISCORD_TOKEN").expect("Fatal: DISCORD_TOKEN required");
     let mongo_uri =
         env::var("MONGO_URI").unwrap_or_else(|_| "mongodb://localhost:27017".to_string());
@@ -32,41 +35,31 @@ async fn main() {
         .expect("Fatal: Failed connecting to MongoDB cluster");
     let db_arc = Arc::new(db);
 
-    // 1. Gatekeeper & Dynamic Rules Sync
+    // 1. Threat Rules Sync
     let gatekeeper = Arc::new(TextGatekeeper::new());
     if let Ok(rules) = db_arc.fetch_dynamic_rules().await {
         let patterns: Vec<String> = rules.into_iter().map(|r| r.pattern).collect();
         info!(
-            "Synchronizing {} dynamic threat rules from MongoDB...",
+            "Synchronized {} dynamic rules from MongoDB.",
             patterns.len()
         );
         let _ = gatekeeper.reload_dynamic_patterns(&patterns);
     }
 
-    // 2. Whitelists Sync
-    let mut whitelisted_users_set = HashSet::new();
-    if let Ok(wl_users) = db_arc.fetch_whitelisted_users().await {
-        for u in wl_users {
-            whitelisted_users_set.insert(u.identifier.to_lowercase());
-        }
-    }
-    info!(
-        "Synchronized {} whitelisted users/IDs into RAM.",
-        whitelisted_users_set.len()
-    );
+    // 2. Whitelist Registry Sync
+    let whitelist = Arc::new(WhitelistRegistry::new());
+    let _ = whitelist.sync_from_db(&db_arc).await;
 
-    let mut whitelisted_images_set = HashSet::new();
-    if let Ok(wl_images) = db_arc.fetch_whitelisted_images().await {
-        for img in wl_images {
-            whitelisted_images_set.insert(img.sha256);
-        }
-    }
-    info!(
-        "Synchronized {} verified safe image hashes into RAM.",
-        whitelisted_images_set.len()
-    );
+    // 3. Media Inspector & AI Queue
+    let http_client = reqwest::Client::new();
+    let media_inspector = Arc::new(MediaInspector::new(
+        http_client.clone(),
+        config.max_download_size_bytes,
+    ));
+    let classifier_client = Arc::new(ResilientClassifierClient::new(classifier_url));
+    let scan_queue = Arc::new(BoundedScanQueue::new(500, classifier_client));
 
-    // 3. Plugins Sync
+    // 4. Plugin Engine Sync
     let plugin_engine = Arc::new(DynamicPluginEngine::new());
     if let Ok(plugins) = db_arc.fetch_active_plugins().await {
         for (name, bytecode) in plugins {
@@ -74,18 +67,14 @@ async fn main() {
         }
     }
 
-    // 4. Queue & Container
-    let classifier_client = Arc::new(ResilientClassifierClient::new(classifier_url));
-    let scan_queue = Arc::new(BoundedScanQueue::new(500, classifier_client));
-
     let container = Arc::new(BotContainer {
+        config,
         gatekeeper,
         db: db_arc,
+        whitelist,
+        media_inspector,
         scan_queue,
         plugin_engine,
-        http_client: reqwest::Client::new(),
-        whitelisted_users: Arc::new(tokio::sync::RwLock::new(whitelisted_users_set)),
-        whitelisted_images: Arc::new(tokio::sync::RwLock::new(whitelisted_images_set)),
     });
 
     let intents = GatewayIntents::GUILDS
@@ -105,6 +94,6 @@ async fn main() {
 
     info!("Bot Core online. Connecting to Discord Gateway...");
     if let Err(why) = client.start().await {
-        error!("Fatal Discord client error: {:?}", why);
+        error!("Fatal Discord client runtime error: {:?}", why);
     }
 }

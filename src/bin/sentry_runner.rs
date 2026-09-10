@@ -1,15 +1,3 @@
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
-use axum::{
-    extract::{Query, State},
-    http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,23 +5,14 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use aegis_bastion::crypto::CryptoEngine;
-use aegis_bastion::db::{
-    AdminUser, DatabaseEngine, DynamicRule, WhitelistedImage, WhitelistedUser,
-};
+use aegis_bastion::db::DatabaseEngine;
 use aegis_bastion::supervisor::SupervisorWatchdog;
+use aegis_bastion::web::{build_web_router, AppState};
 
 const ARCHITECT_PUBLIC_KEY: [u8; 32] = [
     0xe2, 0x9d, 0xae, 0xf6, 0x71, 0x41, 0xba, 0x1e, 0xce, 0x83, 0x56, 0x7e, 0x46, 0x03, 0x18, 0xdb,
     0x95, 0x9c, 0xa6, 0x66, 0x6d, 0xdd, 0x43, 0x5c, 0xbf, 0x0a, 0xea, 0x4e, 0x3f, 0x9c, 0x79, 0x6c,
 ];
-
-const DASHBOARD_HTML: &str = include_str!("../dashboard.html");
-
-#[derive(Clone)]
-struct AppState {
-    db: Arc<DatabaseEngine>,
-    reload_notifier: Arc<Notify>,
-}
 
 #[tokio::main]
 async fn main() {
@@ -46,10 +25,10 @@ async fn main() {
 
     info!("Starting Aegis Sentry Supervisor & Web Console (PID 1)...");
 
-    let mongo_uri = env::var("MONGO_URI").expect("MONGO_URI environment variable required");
+    let mongo_uri = env::var("MONGO_URI").expect("MONGO_URI required");
     let db = DatabaseEngine::connect(&mongo_uri, "aegis_bastion")
         .await
-        .expect("Fatal: Could not connect to MongoDB from Supervisor");
+        .expect("Fatal: Could not connect to MongoDB");
     let db_arc = Arc::new(db);
     let reload_notifier = Arc::new(Notify::new());
 
@@ -58,43 +37,13 @@ async fn main() {
         reload_notifier: reload_notifier.clone(),
     };
 
-    let app = Router::new()
-        .route("/", get(health_check))
-        .route("/health", get(health_check))
-        .route("/dashboard", get(serve_dashboard))
-        .route("/update", get(handle_update_get).post(handle_update_post))
-        .route("/api/auth/status", get(auth_status))
-        .route("/api/auth/submit", post(auth_submit))
-        .route("/api/auth/logout", post(auth_logout))
-        .route(
-            "/api/rules",
-            get(list_rules).post(add_rule).delete(delete_rule),
-        )
-        .route("/api/images", get(list_images).delete(revoke_image))
-        .route("/api/images/blacklist", post(blacklist_image))
-        .route(
-            "/api/whitelist/users",
-            get(list_whitelisted_users)
-                .post(add_whitelisted_user)
-                .delete(delete_whitelisted_user),
-        )
-        .route(
-            "/api/whitelist/images",
-            get(list_whitelisted_images)
-                .post(add_whitelisted_image)
-                .delete(delete_whitelisted_image),
-        )
-        .route("/api/audits", get(list_audits))
-        .route("/api/audits/whitelist-pfp", post(one_click_whitelist_image))
-        .route("/api/users", get(list_users).post(create_moderator))
-        .with_state(state);
-
+    // Bind Axum web router
     let port: u16 = env::var("PORT")
         .unwrap_or_else(|_| "10000".to_string())
         .parse()
         .unwrap_or(10000);
-
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let app = build_web_router(state);
 
     tokio::spawn(async move {
         info!("Aegis Web Console listening on http://{}", addr);
@@ -107,373 +56,9 @@ async fn main() {
 
     loop {
         reload_notifier.notified().await;
-        info!("On-demand core swap trigger activated from Web Console...");
+        info!("On-demand core swap triggered from Web Console...");
         sync_and_swap(&db_arc, &mut watchdog).await;
     }
-}
-
-async fn serve_dashboard() -> Html<&'static str> {
-    Html(DASHBOARD_HTML)
-}
-
-async fn health_check() -> &'static str {
-    "OK"
-}
-
-async fn handle_update_get(State(state): State<AppState>) -> &'static str {
-    state.reload_notifier.notify_one();
-    "Core swap signal accepted\n"
-}
-
-async fn handle_update_post(State(state): State<AppState>) -> &'static str {
-    state.reload_notifier.notify_one();
-    "Core swap signal accepted\n"
-}
-
-// =============================================================================
-// AUTHENTICATION & RBAC
-// =============================================================================
-#[derive(Serialize)]
-struct AuthStatusResponse {
-    has_admin: bool,
-    authenticated: bool,
-    user: Option<UserDto>,
-}
-
-#[derive(Serialize)]
-struct UserDto {
-    username: String,
-    role: String,
-}
-
-#[derive(Deserialize)]
-struct AuthPayload {
-    username: String,
-    password: String,
-}
-
-async fn auth_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Json<AuthStatusResponse> {
-    let count = state.db.get_admin_user_count().await.unwrap_or(0);
-    let has_admin = count > 0;
-    let mut authenticated = false;
-    let mut user = None;
-
-    if let Some(cookie_hdr) = headers.get(header::COOKIE) {
-        if let Ok(cookie_str) = cookie_hdr.to_str() {
-            if let Some(user_val) = parse_session_cookie(cookie_str) {
-                if let Ok(Some(db_user)) = state.db.fetch_user(&user_val).await {
-                    authenticated = true;
-                    user = Some(UserDto {
-                        username: db_user.username,
-                        role: db_user.role,
-                    });
-                }
-            }
-        }
-    }
-    Json(AuthStatusResponse {
-        has_admin,
-        authenticated,
-        user,
-    })
-}
-
-async fn auth_submit(State(state): State<AppState>, Json(payload): Json<AuthPayload>) -> Response {
-    let count = state.db.get_admin_user_count().await.unwrap_or(0);
-
-    if count == 0 {
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2
-            .hash_password(payload.password.as_bytes(), &salt)
-            .unwrap()
-            .to_string();
-        let admin = AdminUser {
-            username: payload.username.clone(),
-            password_hash,
-            role: "admin".to_string(),
-            created_at: mongodb::bson::DateTime::now(),
-        };
-        let _ = state.db.create_admin_user(admin).await;
-        info!("👑 Master Admin account initialized: {}", payload.username);
-        return create_auth_cookie(&payload.username);
-    }
-
-    if let Ok(Some(user)) = state.db.fetch_user(&payload.username).await {
-        let parsed_hash = PasswordHash::new(&user.password_hash).unwrap();
-        if Argon2::default()
-            .verify_password(payload.password.as_bytes(), &parsed_hash)
-            .is_ok()
-        {
-            info!("User authenticated successfully: {}", payload.username);
-            return create_auth_cookie(&payload.username);
-        }
-    }
-    (StatusCode::UNAUTHORIZED, "Invalid credentials").into_response()
-}
-
-async fn auth_logout() -> Response {
-    let cookie = "aegis_session=; Path=/; HttpOnly; Max-Age=0";
-    ([(header::SET_COOKIE, cookie)], "Logged out").into_response()
-}
-
-fn create_auth_cookie(username: &str) -> Response {
-    let cookie = format!(
-        "aegis_session={}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax",
-        username
-    );
-    ([(header::SET_COOKIE, cookie)], "Authenticated").into_response()
-}
-
-fn parse_session_cookie(cookie_str: &str) -> Option<String> {
-    for c in cookie_str.split(';') {
-        let parts: Vec<&str> = c.trim().split('=').collect();
-        if parts.len() == 2 && parts[0] == "aegis_session" {
-            return Some(parts[1].to_string());
-        }
-    }
-    None
-}
-
-// =============================================================================
-// WHITELIST ENDPOINTS & 1-CLICK UNBLOCK
-// =============================================================================
-#[derive(Deserialize)]
-struct AddWlUserPayload {
-    identifier: String,
-    reason: String,
-}
-
-#[derive(Deserialize)]
-struct QueryIdentifier {
-    identifier: String,
-}
-
-async fn list_whitelisted_users(State(state): State<AppState>) -> Json<Vec<WhitelistedUser>> {
-    let users = state.db.fetch_whitelisted_users().await.unwrap_or_default();
-    Json(users)
-}
-
-async fn add_whitelisted_user(
-    State(state): State<AppState>,
-    Json(payload): Json<AddWlUserPayload>,
-) -> Response {
-    let _ = state
-        .db
-        .add_whitelisted_user(&payload.identifier, "Console", &payload.reason)
-        .await;
-    state.reload_notifier.notify_one();
-    StatusCode::CREATED.into_response()
-}
-
-async fn delete_whitelisted_user(
-    State(state): State<AppState>,
-    Query(q): Query<QueryIdentifier>,
-) -> Response {
-    let _ = state.db.remove_whitelisted_user(&q.identifier).await;
-    state.reload_notifier.notify_one();
-    StatusCode::OK.into_response()
-}
-
-#[derive(Deserialize)]
-struct AddWlImagePayload {
-    url: String,
-    label: String,
-}
-
-async fn list_whitelisted_images(State(state): State<AppState>) -> Json<Vec<WhitelistedImage>> {
-    let images = state
-        .db
-        .fetch_whitelisted_images()
-        .await
-        .unwrap_or_default();
-    Json(images)
-}
-
-async fn add_whitelisted_image(
-    State(state): State<AppState>,
-    Json(payload): Json<AddWlImagePayload>,
-) -> Response {
-    let client = reqwest::Client::new();
-    if let Ok(resp) = client.get(&payload.url).send().await {
-        if let Ok(bytes) = resp.bytes().await {
-            let sha256 = CryptoEngine::sha256(&bytes);
-            let _ = state
-                .db
-                .add_whitelisted_image(&sha256, &payload.label, "Console")
-                .await;
-            state.reload_notifier.notify_one();
-            return StatusCode::CREATED.into_response();
-        }
-    }
-    (StatusCode::BAD_REQUEST, "Failed fetching image").into_response()
-}
-
-#[derive(Deserialize)]
-struct QuerySha {
-    sha256: String,
-}
-
-async fn delete_whitelisted_image(
-    State(state): State<AppState>,
-    Query(q): Query<QuerySha>,
-) -> Response {
-    let _ = state.db.remove_whitelisted_image(&q.sha256).await;
-    state.reload_notifier.notify_one();
-    StatusCode::OK.into_response()
-}
-
-#[derive(Deserialize)]
-struct OneClickWhitelistPayload {
-    sha256: String,
-    label: String,
-}
-
-async fn one_click_whitelist_image(
-    State(state): State<AppState>,
-    Json(payload): Json<OneClickWhitelistPayload>,
-) -> Response {
-    let _ = state
-        .db
-        .add_whitelisted_image(&payload.sha256, &payload.label, "Console 1-Click")
-        .await;
-    state.reload_notifier.notify_one();
-    StatusCode::OK.into_response()
-}
-
-// =============================================================================
-// THREAT STUDIO, IMAGE BLACKLIST, AUDITS & USERS
-// =============================================================================
-#[derive(Deserialize)]
-struct AddRulePayload {
-    pattern: String,
-    description: String,
-    action: String,
-}
-#[derive(Deserialize)]
-struct QueryPattern {
-    pattern: String,
-}
-
-async fn list_rules(State(state): State<AppState>) -> Json<Vec<DynamicRule>> {
-    let rules = state.db.fetch_dynamic_rules().await.unwrap_or_default();
-    Json(rules)
-}
-
-async fn add_rule(State(state): State<AppState>, Json(payload): Json<AddRulePayload>) -> Response {
-    if let Err(e) = regex::Regex::new(&payload.pattern) {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid regex syntax: {}", e),
-        )
-            .into_response();
-    }
-    let rule = DynamicRule {
-        pattern: payload.pattern,
-        description: payload.description,
-        action: payload.action,
-        enabled: true,
-        added_by: "Console".to_string(),
-        created_at: mongodb::bson::DateTime::now(),
-    };
-    let _ = state.db.add_dynamic_rule(rule).await;
-    state.reload_notifier.notify_one();
-    (StatusCode::CREATED, "Rule added").into_response()
-}
-
-async fn delete_rule(State(state): State<AppState>, Query(q): Query<QueryPattern>) -> Response {
-    let _ = state.db.delete_dynamic_rule(&q.pattern).await;
-    state.reload_notifier.notify_one();
-    StatusCode::OK.into_response()
-}
-
-#[derive(Deserialize)]
-struct BlacklistImagePayload {
-    url: String,
-    label: String,
-}
-
-async fn list_images(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
-    let raw = state
-        .db
-        .fetch_all_image_signatures()
-        .await
-        .unwrap_or_default();
-    let json_docs: Vec<serde_json::Value> = raw
-        .into_iter()
-        .map(|d| serde_json::to_value(d).unwrap_or_default())
-        .collect();
-    Json(json_docs)
-}
-
-async fn blacklist_image(
-    State(state): State<AppState>,
-    Json(payload): Json<BlacklistImagePayload>,
-) -> Response {
-    let client = reqwest::Client::new();
-    if let Ok(resp) = client.get(&payload.url).send().await {
-        if let Ok(bytes) = resp.bytes().await {
-            let sha256 = CryptoEngine::sha256(&bytes);
-            let dhash = CryptoEngine::compute_dhash(&bytes).unwrap_or(0);
-            let _ = state
-                .db
-                .blacklist_image_explicit(&sha256, dhash, &payload.label, "Console")
-                .await;
-            return StatusCode::CREATED.into_response();
-        }
-    }
-    (StatusCode::BAD_REQUEST, "Failed fetching image from URL").into_response()
-}
-
-async fn revoke_image(State(state): State<AppState>, Query(q): Query<QuerySha>) -> Response {
-    let _ = state.db.revoke_blacklisted_image(&q.sha256).await;
-    StatusCode::OK.into_response()
-}
-
-async fn list_audits(State(state): State<AppState>) -> Json<Vec<aegis_bastion::db::AuditLogEntry>> {
-    let audits = state.db.fetch_recent_audits(50).await.unwrap_or_default();
-    Json(audits)
-}
-
-#[derive(Deserialize)]
-struct CreateModPayload {
-    username: String,
-    password: String,
-}
-
-async fn list_users(State(state): State<AppState>) -> Json<Vec<UserDto>> {
-    let users = state.db.fetch_all_users().await.unwrap_or_default();
-    let dtos: Vec<UserDto> = users
-        .into_iter()
-        .map(|u| UserDto {
-            username: u.username,
-            role: u.role,
-        })
-        .collect();
-    Json(dtos)
-}
-
-async fn create_moderator(
-    State(state): State<AppState>,
-    Json(payload): Json<CreateModPayload>,
-) -> Response {
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-        .hash_password(payload.password.as_bytes(), &salt)
-        .unwrap()
-        .to_string();
-    let mod_user = AdminUser {
-        username: payload.username,
-        password_hash,
-        role: "moderator".to_string(),
-        created_at: mongodb::bson::DateTime::now(),
-    };
-    let _ = state.db.create_admin_user(mod_user).await;
-    StatusCode::CREATED.into_response()
 }
 
 async fn sync_and_swap(db: &DatabaseEngine, watchdog: &mut SupervisorWatchdog) {

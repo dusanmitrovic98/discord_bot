@@ -91,6 +91,12 @@ pub struct SupervisorWatchdog {
     lkg_blob: Option<Vec<u8>>,
 }
 
+impl Default for SupervisorWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SupervisorWatchdog {
     pub fn new() -> Self {
         Self {

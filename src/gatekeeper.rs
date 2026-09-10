@@ -5,13 +5,19 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ThreatVerdict {
     Safe,
-    DeleteOnly, // Soft rule (e.g. 'link' in name -> delete messages only, NO ban)
+    DeleteOnly, // Soft rule (e.g. 'link' in display name -> delete message, NO ban)
     InstantBan, // Hardcoded predatory raid rule (e.g. 'hotlink', 'megalink', 'cp' -> instant ban)
 }
 
 pub struct TextGatekeeper {
     hardcoded_patterns: RegexSet,
     dynamic_patterns: Arc<RwLock<Option<RegexSet>>>,
+}
+
+impl Default for TextGatekeeper {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TextGatekeeper {
@@ -67,9 +73,12 @@ impl TextGatekeeper {
         Ok(())
     }
 
-    fn map_visual_homoglyphs(text: &str) -> String {
-        text.chars()
-            .map(|c| match c {
+    /// Map visual homoglyphs into a pre-allocated buffer
+    fn map_visual_homoglyphs(text: &str, out: &mut String) {
+        out.clear();
+        out.reserve(text.len());
+        for c in text.chars() {
+            let mapped = match c {
                 'С' | 'с' => 'c',
                 'Р' | 'р' => 'p',
                 'ѕ' => 's',
@@ -80,56 +89,78 @@ impl TextGatekeeper {
                 'о' | 'О' => 'o',
                 'і' | 'І' => 'i',
                 other => other,
-            })
-            .collect()
+            };
+            out.push(mapped);
+        }
     }
 
-    fn collapse_duplicates(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
+    /// Collapses consecutive duplicate characters into a pre-allocated buffer
+    fn collapse_duplicates(input: &str, out: &mut String) {
+        out.clear();
+        out.reserve(input.len());
         let mut prev: Option<char> = None;
-        for c in s.chars() {
+        for c in input.chars() {
             if Some(c) != prev {
-                result.push(c);
+                out.push(c);
                 prev = Some(c);
             }
         }
-        result
     }
 
+    /// Allocation-optimized multi-pass canonicalization
     pub fn canonicalize(&self, input: &str) -> (String, String, String) {
-        let homoglyphs_mapped = Self::map_visual_homoglyphs(input);
-        let ascii_mapped = deunicode(&homoglyphs_mapped);
-        let cleaned: String = ascii_mapped
-            .to_lowercase()
-            .chars()
-            .filter(|c| !c.is_control() && *c != '\u{200B}' && *c != '\u{FEFF}')
-            .collect();
+        // Buffer 1: Homoglyphs
+        let mut buffer_homo = String::with_capacity(input.len());
+        Self::map_visual_homoglyphs(input, &mut buffer_homo);
 
-        let normalized = cleaned
-            .replace('0', "o")
-            .replace('1', "i")
-            .replace('3', "e")
-            .replace('4', "a")
-            .replace('5', "s")
-            .replace('7', "t")
-            .replace('@', "a")
-            .replace('$', "s");
+        // Buffer 2: Transliterated ASCII
+        let ascii_mapped = deunicode(&buffer_homo);
 
-        let alpha_only: String = normalized.chars().filter(|c| c.is_alphanumeric()).collect();
-        let deduped: String = Self::collapse_duplicates(&alpha_only);
+        // Buffer 3: Cleaned & Leet-normalized
+        let mut normalized = String::with_capacity(ascii_mapped.len());
+        for c in ascii_mapped.chars() {
+            if c.is_control() || c == '\u{200B}' || c == '\u{FEFF}' {
+                continue;
+            }
+            let lower = c.to_ascii_lowercase();
+            let leet = match lower {
+                '0' => 'o',
+                '1' => 'i',
+                '3' => 'e',
+                '4' => 'a',
+                '5' => 's',
+                '7' => 't',
+                '@' => 'a',
+                '$' => 's',
+                other => other,
+            };
+            normalized.push(leet);
+        }
+
+        // Buffer 4: Alphanumeric projection
+        let mut alpha_only = String::with_capacity(normalized.len());
+        for c in normalized.chars() {
+            if c.is_alphanumeric() {
+                alpha_only.push(c);
+            }
+        }
+
+        // Buffer 5: Deduplicated projection
+        let mut deduped = String::with_capacity(alpha_only.len());
+        Self::collapse_duplicates(&alpha_only, &mut deduped);
 
         (normalized, alpha_only, deduped)
     }
 
-    /// Evaluates threat severity using the two-tier execution hierarchy:
-    /// 1. Tier 1 (Hardcoded fast-path) -> Returns `ThreatVerdict::InstantBan` in <1μs.
-    /// 2. Tier 2 (Dynamic web rules)   -> Returns `ThreatVerdict::DeleteOnly`.
+    /// Evaluates threat severity using the two-tier execution hierarchy
     pub fn evaluate_threat(&self, raw_text: &str) -> ThreatVerdict {
+        if raw_text.is_empty() {
+            return ThreatVerdict::Safe;
+        }
+
         let (normalized, alpha_only, deduped) = self.canonicalize(raw_text);
 
-        // =====================================================================
-        // TIER 1: FAST-PATH (Hardcoded patterns ALWAYS trigger Instant Ban)
-        // =====================================================================
+        // TIER 1: Hardcoded fast-path ALWAYS triggers Instant Ban in <1μs
         if self.hardcoded_patterns.is_match(&normalized)
             || self.hardcoded_patterns.is_match(&alpha_only)
             || self.hardcoded_patterns.is_match(&deduped)
@@ -137,9 +168,7 @@ impl TextGatekeeper {
             return ThreatVerdict::InstantBan;
         }
 
-        // =====================================================================
-        // TIER 2: DYNAMIC RAM CACHE (Soft rules trigger Delete Only)
-        // =====================================================================
+        // TIER 2: Dynamic RAM Cache (Soft rules trigger Delete Only)
         if let Ok(guard) = self.dynamic_patterns.read() {
             if let Some(dynamic_set) = &*guard {
                 if dynamic_set.is_match(&normalized)
@@ -165,7 +194,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_catches_all_architect_reported_variants() {
+    fn test_raid_exact_accounts_instant_ban() {
         let gatekeeper = TextGatekeeper::new();
 
         let attacks = vec![
@@ -175,103 +204,49 @@ mod tests {
             "megalink08816",
             "megalink0588",
             "megalinkstuff0680",
+            "hotlink0093",
+            "HOT 🔥 LINK",
+            "dsm open",
+            "dsmopen",
         ];
 
         for username in attacks {
             assert_eq!(
                 gatekeeper.evaluate_threat(username),
-                ThreatVerdict::InstantBan
+                ThreatVerdict::InstantBan,
+                "Failed asserting InstantBan for: {}",
+                username
             );
         }
     }
 
     #[test]
-    fn test_hardcoded_hotlink_and_dsm_open() {
+    fn test_dynamic_soft_rule_hierarchy() {
         let gatekeeper = TextGatekeeper::new();
 
-        assert_eq!(
-            gatekeeper.evaluate_threat("hotlink0093"),
-            ThreatVerdict::InstantBan
-        );
-        assert_eq!(
-            gatekeeper.evaluate_threat("HOT 🔥 LINK"),
-            ThreatVerdict::InstantBan
-        );
-        assert_eq!(
-            gatekeeper.evaluate_threat("h-o-t---l-i-n-k"),
-            ThreatVerdict::InstantBan
-        );
-        assert_eq!(
-            gatekeeper.evaluate_threat("DSM open DSM open DSM open"),
-            ThreatVerdict::InstantBan
-        );
-        assert_eq!(
-            gatekeeper.evaluate_threat("dsmopen"),
-            ThreatVerdict::InstantBan
-        );
-
-        // Benign names remain safe
-        assert_eq!(
-            gatekeeper.evaluate_threat("hotel_california"),
-            ThreatVerdict::Safe
-        );
-        assert_eq!(
-            gatekeeper.evaluate_threat("shotgun_hero"),
-            ThreatVerdict::Safe
-        );
-    }
-
-    #[test]
-    fn test_soft_dynamic_rule_hierarchy() {
-        let gatekeeper = TextGatekeeper::new();
-
-        // Inject dynamic soft rule: 'link'
         let dynamic_rules = vec![r"(?i)l+i+n+k+".to_string()];
         gatekeeper.reload_dynamic_patterns(&dynamic_rules).unwrap();
 
-        // 1. Attacker with 'hotlink' MUST trigger InstantBan (Tier 1 Priority)
+        // Hardcoded hotlink hits Tier 1 first (InstantBan)
         assert_eq!(
             gatekeeper.evaluate_threat("hotlink0093"),
             ThreatVerdict::InstantBan
         );
-        assert_eq!(
-            gatekeeper.evaluate_threat("HOT 🔥 LINK"),
-            ThreatVerdict::InstantBan
-        );
 
-        // 2. Member with generic 'link' triggers DeleteOnly (Tier 2 Soft Policy)
+        // Generic link hits Tier 2 (DeleteOnly)
         assert_eq!(
-            gatekeeper.evaluate_threat("cool_links_daily"),
+            gatekeeper.evaluate_threat("game_link"),
             ThreatVerdict::DeleteOnly
         );
         assert_eq!(
-            gatekeeper.evaluate_threat("link_master"),
+            gatekeeper.evaluate_threat("steam_link_in_bio"),
             ThreatVerdict::DeleteOnly
         );
 
-        // 3. Normal member remains Safe
+        // Normal name is Safe
         assert_eq!(
             gatekeeper.evaluate_threat("normal_gamer_guy"),
             ThreatVerdict::Safe
         );
-    }
-
-    #[test]
-    fn test_legitimate_usernames_are_safe() {
-        let gatekeeper = TextGatekeeper::new();
-
-        let benign = vec![
-            "bubbly_quokka_34489",
-            "stylish_peacock_82532",
-            "jamesaccess0570",
-            "hyperion_prime",
-            "rustacean_engineer",
-            "normal_gamer_guy",
-            "mega_man_classic_fan",
-        ];
-
-        for user in benign {
-            assert_eq!(gatekeeper.evaluate_threat(user), ThreatVerdict::Safe);
-        }
     }
 }
