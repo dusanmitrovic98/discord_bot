@@ -1,23 +1,29 @@
 use deunicode::deunicode;
-use regex::RegexSet;
+use regex::{Regex, RegexSet};
+use std::sync::{Arc, RwLock};
 
 pub struct TextGatekeeper {
-    predatory_patterns: RegexSet,
+    hardcoded_patterns: RegexSet,
+    dynamic_patterns: Arc<RwLock<Option<RegexSet>>>,
 }
 
 impl TextGatekeeper {
     pub fn new() -> Self {
-        let patterns = &[
+        let hardcoded = &[
             // 1. Exact words with word boundaries
             r"(?i)\bcp\b",
-            // 2. Patterns with optional separators and character repetition
+            // 2. CP variants with arbitrary separators & repetition
             r"(?i)c+[\._\-\s]*p+[\._\-\s]*(s+t+u+f+|c+o+n+t+e+n+t+|l+i+n+k+|v+i+d+|p+i+c+s?|p+a+c+k+|f+o+l+d+e+r+)",
-            r"(?i)m+e+g+a+[\._\-\s]*(l+i+n+k+|f+o+l+d+e+r+|p+a+c+k+|n+z+|s+t+u+f+)",
-            // 3. Direct continuous matches for alphanumeric projections (Handles 'mmmeeegggaaallliinnkk')
             r"(?i)c+p+(s+t+u+f+|c+o+n+t+e+n+t+|l+i+n+k+|v+i+d+|p+i+c+s?|p+a+c+k+|f+o+l+d+e+r+)",
-            r"(?i)m+e+g+a+(l+i+n+k+|f+o+l+d+e+r+|p+a+c+k+|n+z+|s+t+u+f+)",
-            // 4. Noise symbol injections (e.g., cp_@#$$!%STUf1)
             r"(?i)c+[\W_]*p+[\W_a-z]{0,6}(s+t+u+f+|c+o+n+t+e+n+t+|l+i+n+k+|v+i+d+|p+i+c+s?|p+a+c+k+|f+o+l+d+e+r+)",
+            // 3. Mega Link variants (Immune to emoji injections like MEGA 🔥 LINK)
+            r"(?i)m+e+g+a+[\W_a-z]{0,8}(l+i+n+k+|f+o+l+d+e+r+|p+a+c+k+|n+z+|s+t+u+f+)",
+            r"(?i)m+e+g+a+(l+i+n+k+|f+o+l+d+e+r+|p+a+c+k+|n+z+|s+t+u+f+)",
+            // 4. HARDCODED HOTLINK & RAID VECTORS (Fast-Path, matches 'HOT 🔥 LINK')
+            r"(?i)h+o+t+[\W_a-z]{0,8}(l+i+n+k+|f+o+l+d+e+r+|p+a+c+k+|n+z+|s+t+u+f+)",
+            r"(?i)h+o+t+(l+i+n+k+|f+o+l+d+e+r+|p+a+c+k+|n+z+|s+t+u+f+)",
+            r"(?i)d+s+m+[\W_a-z]{0,6}o+p+e+n+",
+            r"(?i)dsmopen",
             // 5. Zero-tolerance predatory keywords
             r"(?i)child[\._\-\s]*(porn|sex|abuse)",
             r"(?i)child(porn|sex|abuse)",
@@ -27,20 +33,41 @@ impl TextGatekeeper {
             r"(?i)cheesepizza",
         ];
 
-        let predatory_patterns =
-            RegexSet::new(patterns).expect("Gatekeeper regex rules must compile");
-        Self { predatory_patterns }
+        let hardcoded_patterns =
+            RegexSet::new(hardcoded).expect("Hardcoded regex rules must compile");
+        Self {
+            hardcoded_patterns,
+            dynamic_patterns: Arc::new(RwLock::new(None)),
+        }
     }
 
-    /// Explicit visual homoglyph mapping: Cyrillic & Greek characters mapped to Latin visual twins
+    /// Loads custom dynamic regexes from MongoDB into memory without server restarts
+    pub fn reload_dynamic_patterns(&self, patterns: &[String]) -> Result<(), regex::Error> {
+        if patterns.is_empty() {
+            let mut guard = self.dynamic_patterns.write().unwrap();
+            *guard = None;
+            return Ok(());
+        }
+
+        // Validate each regex individually first (NASA Rule 5)
+        for pat in patterns {
+            Regex::new(pat)?;
+        }
+
+        let new_set = RegexSet::new(patterns)?;
+        let mut guard = self.dynamic_patterns.write().unwrap();
+        *guard = Some(new_set);
+        Ok(())
+    }
+
     fn map_visual_homoglyphs(text: &str) -> String {
         text.chars()
             .map(|c| match c {
-                'С' | 'с' => 'c', // Cyrillic Es
-                'Р' | 'р' => 'p', // Cyrillic Er (visually 'P')
-                'ѕ' => 's',       // Cyrillic Dze
-                'т' => 't',       // Cyrillic Te
-                'υ' => 'u',       // Greek Upsilon
+                'С' | 'с' => 'c',
+                'Р' | 'р' => 'p',
+                'ѕ' => 's',
+                'т' => 't',
+                'υ' => 'u',
                 'а' | 'А' => 'a',
                 'е' | 'Е' => 'e',
                 'о' | 'О' => 'o',
@@ -50,7 +77,6 @@ impl TextGatekeeper {
             .collect()
     }
 
-    /// Collapses consecutive duplicate characters: "mmmeeegggaaallliinnkk" -> "megalink"
     fn collapse_duplicates(s: &str) -> String {
         let mut result = String::with_capacity(s.len());
         let mut prev: Option<char> = None;
@@ -63,23 +89,15 @@ impl TextGatekeeper {
         result
     }
 
-    /// Multi-pass canonicalization:
-    /// Returns: (normalized, alpha_only, deduped)
     pub fn canonicalize(&self, input: &str) -> (String, String, String) {
-        // 1. Visual homoglyphs mapped
         let homoglyphs_mapped = Self::map_visual_homoglyphs(input);
-
-        // 2. Transliterate remaining full-width Unicode
         let ascii_mapped = deunicode(&homoglyphs_mapped);
-
-        // 3. Lowercase and strip control characters & zero-width spaces
         let cleaned: String = ascii_mapped
             .to_lowercase()
             .chars()
             .filter(|c| !c.is_control() && *c != '\u{200B}' && *c != '\u{FEFF}')
             .collect();
 
-        // 4. Leet-speak substitution
         let normalized = cleaned
             .replace('0', "o")
             .replace('1', "i")
@@ -90,21 +108,41 @@ impl TextGatekeeper {
             .replace('@', "a")
             .replace('$', "s");
 
-        // 5. Alphanumeric projection (strips punctuation & delimiters)
         let alpha_only: String = normalized.chars().filter(|c| c.is_alphanumeric()).collect();
-
-        // 6. Deduplicated projection (collapses repeated characters)
         let deduped: String = Self::collapse_duplicates(&alpha_only);
 
         (normalized, alpha_only, deduped)
     }
 
-    /// Evaluates whether a text or username violates zero-tolerance safety policies across all projections.
+    /// Two-Tier Fast-Path Evaluation
     pub fn is_flagged(&self, raw_text: &str) -> bool {
         let (normalized, alpha_only, deduped) = self.canonicalize(raw_text);
-        self.predatory_patterns.is_match(&normalized)
-            || self.predatory_patterns.is_match(&alpha_only)
-            || self.predatory_patterns.is_match(&deduped)
+
+        // =====================================================================
+        // TIER 1: FAST-PATH (Hardcoded patterns run in <1 microsecond)
+        // =====================================================================
+        if self.hardcoded_patterns.is_match(&normalized)
+            || self.hardcoded_patterns.is_match(&alpha_only)
+            || self.hardcoded_patterns.is_match(&deduped)
+        {
+            return true; // Match found immediately; zero database overhead!
+        }
+
+        // =====================================================================
+        // TIER 2: DYNAMIC RAM CACHE (Evaluated only if fast-path passes)
+        // =====================================================================
+        if let Ok(guard) = self.dynamic_patterns.read() {
+            if let Some(dynamic_set) = &*guard {
+                if dynamic_set.is_match(&normalized)
+                    || dynamic_set.is_match(&alpha_only)
+                    || dynamic_set.is_match(&deduped)
+                {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -179,5 +217,21 @@ mod tests {
                 user
             );
         }
+    }
+
+    #[test]
+    fn test_hardcoded_hotlink_and_dsm_open() {
+        let gatekeeper = TextGatekeeper::new();
+
+        // Exact attack patterns from the Architect's screenshot
+        assert!(gatekeeper.is_flagged("hotlink0093"));
+        assert!(gatekeeper.is_flagged("HOT 🔥 LINK"));
+        assert!(gatekeeper.is_flagged("h-o-t---l-i-n-k"));
+        assert!(gatekeeper.is_flagged("DSM open DSM open DSM open"));
+        assert!(gatekeeper.is_flagged("dsmopen"));
+
+        // Benign names remain safe
+        assert!(!gatekeeper.is_flagged("hotel_california"));
+        assert!(!gatekeeper.is_flagged("shotgun_hero"));
     }
 }

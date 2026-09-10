@@ -12,9 +12,14 @@ futures = "0.3"
 # Discord Gateway
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "cache"] }
 
-# Database & Storage (mongodb 3.x uses Tokio by default)
+# Database & Storage
 mongodb = "3.1"
 bson = { version = "2.11", features = ["chrono-0_4"] }
+
+# Web Framework & Dashboard API
+axum = { version = "0.7", features = ["json", "form"] }
+tower-http = { version = "0.5", features = ["cors"] }
+argon2 = "0.5"
 
 # Security & Hashing
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
@@ -22,7 +27,7 @@ sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
 
-# Image Processing (Stripped to minimal decoders for 512MB RAM constraint)
+# Image Processing
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Text Normalization & Anti-Evasion

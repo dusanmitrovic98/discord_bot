@@ -38,7 +38,7 @@ pub struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
+    async fn ready(&self, _: Context, _ready: Ready) {
         info!(
             "Sebastian The Butler is Online & Vigilant! Operating exclusively for Guild: {}",
             AUTHORIZED_GUILD_ID

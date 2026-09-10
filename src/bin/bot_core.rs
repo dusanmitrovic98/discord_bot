@@ -1,7 +1,7 @@
 use serenity::prelude::*;
 use std::env;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use aegis_bastion::bot::{BotContainer, BotContainerKey, Handler};
 use aegis_bastion::db::DatabaseEngine;
@@ -36,6 +36,21 @@ async fn main() {
 
     // 4. Initialize Local Gatekeeper Heuristics
     let gatekeeper = Arc::new(TextGatekeeper::new());
+
+    // Synchronize dynamic threat regexes from MongoDB Atlas into memory
+    match db_arc.fetch_dynamic_rules().await {
+        Ok(rules) => {
+            let patterns: Vec<String> = rules.into_iter().map(|r| r.pattern).collect();
+            info!(
+                "Synchronizing {} dynamic threat rules from MongoDB...",
+                patterns.len()
+            );
+            if let Err(e) = gatekeeper.reload_dynamic_patterns(&patterns) {
+                error!("Failed compiling dynamic rules: {}", e);
+            }
+        }
+        Err(e) => warn!("Could not fetch dynamic rules from database: {}", e),
+    }
 
     // 5. Initialize Sandboxed WASM Plugin Engine and Synchronize from DB
     let plugin_engine = Arc::new(DynamicPluginEngine::new());
