@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     Json,
 };
 use base64::Engine;
@@ -18,10 +18,78 @@ use crate::web::auth::{
 };
 use crate::web::AppState;
 
-const DASHBOARD_HTML: &str = include_str!("../dashboard.html");
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 
-pub async fn serve_dashboard() -> Html<&'static str> {
-    Html(DASHBOARD_HTML)
+const FALLBACK_DASHBOARD_HTML: &str = include_str!("../dashboard.html");
+
+/// Serves the dashboard HTML.
+/// Auto-sanitizes commit hashes from Gist URLs, forces cache-busting,
+/// and sets `Cache-Control: no-store` so browser refreshes are always instantaneous.
+pub async fn serve_dashboard() -> Response {
+    if let Ok(gist_url) = std::env::var("DASHBOARD_GIST_URL") {
+        let mut clean_url = gist_url.trim().to_string();
+
+        // Auto-strip any 40-character commit hash from the Gist URL path
+        // Transforms: /raw/3a98c74.../dashboard.html -> /raw/dashboard.html
+        if let Some(raw_idx) = clean_url.find("/raw/") {
+            let after_raw = &clean_url[raw_idx + 5..];
+            if let Some(slash_idx) = after_raw.find('/') {
+                let segment = &after_raw[..slash_idx];
+                if segment.len() == 40 && segment.chars().all(|c| c.is_ascii_hexdigit()) {
+                    clean_url = format!(
+                        "{}/raw/{}",
+                        &clean_url[..raw_idx],
+                        &after_raw[slash_idx + 1..]
+                    );
+                }
+            }
+        }
+
+        if !clean_url.is_empty() {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .unwrap_or_default();
+
+            let separator = if clean_url.contains('?') { "&" } else { "?" };
+            let fresh_url = format!(
+                "{}{}_t={}",
+                clean_url,
+                separator,
+                chrono::Utc::now().timestamp_millis()
+            );
+
+            if let Ok(resp) = client
+                .get(&fresh_url)
+                .header("Cache-Control", "no-cache")
+                .header("Pragma", "no-cache")
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(html) = resp.text().await {
+                        return (
+                            [
+                                (CONTENT_TYPE, "text/html; charset=utf-8"),
+                                (CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                            ],
+                            html,
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        [
+            (CONTENT_TYPE, "text/html; charset=utf-8"),
+            (CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+        ],
+        FALLBACK_DASHBOARD_HTML,
+    )
+        .into_response()
 }
 
 pub async fn health_check() -> &'static str {
