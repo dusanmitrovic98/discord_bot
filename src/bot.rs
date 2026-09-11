@@ -13,7 +13,7 @@ use serenity::model::id::{GuildId, UserId};
 use serenity::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::GuildConfig;
 use crate::db::{AuditLogEntry, DatabaseEngine};
@@ -556,11 +556,16 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
         "whitelist-pfp" => cmd_whitelist_pfp(ctx, c, &cmd).await,
         "db-stats" => cmd_db_stats(ctx, c, &cmd).await,
         plugin_cmd => {
-            // Dynamic Community Plugin Dispatcher!
+            // Dynamic Community Plugin Dispatcher with Telemetry
             let mut handled = false;
             for manifest in c.plugin_engine.get_all_manifests() {
                 if manifest.slash_commands.iter().any(|s| s.name == plugin_cmd) {
                     handled = true;
+                    info!(
+                        "🧩 [PLUGIN] Executing /{} from plugin '{}' for user {}",
+                        plugin_cmd, manifest.name, caller_id
+                    );
+
                     let opts_json = serde_json::to_string(&cmd.data.options).unwrap_or_default();
                     match c.plugin_engine.execute_slash_command(
                         &manifest.name,
@@ -568,6 +573,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                         &opts_json,
                     ) {
                         Ok(reply) => {
+                            info!("🎲 [PLUGIN RESULT] /{} output: {}", plugin_cmd, reply);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -578,6 +584,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                                 .await;
                         }
                         Err(e) => {
+                            error!("❌ [PLUGIN ERROR] /{} trapped: {}", plugin_cmd, e);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -594,6 +601,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                 }
             }
             if !handled {
+                warn!("⚠️ [PLUGIN] Unhandled slash command: /{}", plugin_cmd);
                 let _ = cmd
                     .create_response(
                         &ctx.http,

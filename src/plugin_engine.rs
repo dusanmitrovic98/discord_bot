@@ -41,8 +41,10 @@ impl Default for PluginManifest {
     }
 }
 
+/// In-memory representation of a validated, compiled WASM plugin.
 pub struct LoadedPlugin {
     pub manifest: PluginManifest,
+    pub module: Module,
     pub wasm_bytes: Vec<u8>,
 }
 
@@ -60,9 +62,10 @@ impl Default for DynamicPluginEngine {
 }
 
 impl DynamicPluginEngine {
+    /// Creates a fuel-metered WASM engine adhering to bounded execution invariants (NASA Rule 2).
     pub fn new() -> Self {
         let mut config = Config::new();
-        config.consume_fuel(true); // NASA Rule 2: Strict execution bounding
+        config.consume_fuel(true);
         let engine = Engine::new(&config).expect("Wasmtime engine initialization failed");
 
         Self {
@@ -77,10 +80,24 @@ impl DynamicPluginEngine {
         self
     }
 
-    /// Loads or hot-swaps a WASM plugin bytecode module in memory atomically
+    /// Pre-populates host functions (entropy, capabilities) exposed to guest sandboxes.
+    fn build_linker(&self) -> Result<Linker<()>> {
+        let mut linker = Linker::new(&self.engine);
+        linker
+            .func_wrap("env", "host_random_u32", || -> u32 {
+                rand::random::<u32>()
+            })
+            .map_err(|e| {
+                AegisError::PluginError(format!("Failed to register host imports: {}", e))
+            })?;
+        Ok(linker)
+    }
+
+    /// Loads or hot-swaps a WASM plugin bytecode module in memory atomically.
+    /// Compiles the module once to avoid CPU thrashing on invocations (NASA Rule 2).
     pub fn hot_swap_plugin(&self, name: &str, wasm_bytes: &[u8]) -> Result<PluginManifest> {
         let module = Module::new(&self.engine, wasm_bytes)
-            .map_err(|e| AegisError::PluginError(format!("WASM validation failed: {}", e)))?;
+            .map_err(|e| AegisError::PluginError(format!("WASM compilation failed: {}", e)))?;
 
         let manifest = self.extract_manifest(&module)?;
 
@@ -93,6 +110,7 @@ impl DynamicPluginEngine {
             name.to_string(),
             LoadedPlugin {
                 manifest: manifest.clone(),
+                module,
                 wasm_bytes: wasm_bytes.to_vec(),
             },
         );
@@ -126,19 +144,18 @@ impl DynamicPluginEngine {
         }
     }
 
-    /// Extracts declarative plugin manifest via guest export or JSON metadata
+    /// Extracts declarative plugin manifest via guest export or JSON metadata.
     fn extract_manifest(&self, module: &Module) -> Result<PluginManifest> {
         let mut store = Store::new(&self.engine, ());
         store
             .set_fuel(500_000)
             .map_err(|e| AegisError::PluginError(e.to_string()))?;
 
-        let linker = Linker::new(&self.engine);
+        let linker = self.build_linker()?;
         let instance = linker
             .instantiate(&mut store, module)
             .map_err(|e| AegisError::PluginError(format!("Instantiation failed: {}", e)))?;
 
-        // 1. Try typed function export: fn get_manifest_json() -> (ptr, len)
         if let Ok(manifest_fn) = instance.get_typed_func::<(), i64>(&mut store, "get_manifest") {
             let packed = manifest_fn
                 .call(&mut store, ())
@@ -157,7 +174,7 @@ impl DynamicPluginEngine {
                     .map_err(|e| {
                         AegisError::PluginError(format!("Invalid UTF-8 in manifest: {}", e))
                     })?
-                    .trim_end_matches('\0'); // <--- ADD THIS to strip WASM memory padding
+                    .trim_end_matches('\0');
                 let manifest: PluginManifest = serde_json::from_str(json_str).map_err(|e| {
                     AegisError::PluginError(format!("Invalid manifest JSON: {}", e))
                 })?;
@@ -165,11 +182,10 @@ impl DynamicPluginEngine {
             }
         }
 
-        // 2. Default fallback manifest based on module name
         Ok(PluginManifest::default())
     }
 
-    /// Executes a slash command on the guest plugin using packed pointer/len JSON ABI
+    /// Executes a slash command on the guest plugin using packed pointer/len JSON ABI.
     pub fn execute_slash_command(
         &self,
         plugin_name: &str,
@@ -190,19 +206,15 @@ impl DynamicPluginEngine {
             .set_fuel(1_000_000)
             .map_err(|e| AegisError::PluginError(e.to_string()))?;
 
-        let linker = Linker::new(&self.engine);
-        let module = Module::new(&self.engine, &plugin.wasm_bytes)
-            .map_err(|e| AegisError::PluginError(e.to_string()))?;
-
+        let linker = self.build_linker()?;
         let instance = linker
-            .instantiate(&mut store, &module)
+            .instantiate(&mut store, &plugin.module)
             .map_err(|e| AegisError::PluginError(e.to_string()))?;
 
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or_else(|| AegisError::PluginError("Plugin lacks exported linear memory".into()))?;
 
-        // Format input payload
         let input_payload = serde_json::json!({
             "command": command_name,
             "options": options_json
@@ -219,11 +231,9 @@ impl DynamicPluginEngine {
             .map_err(|e| AegisError::PluginError(format!("Alloc trapped: {}", e)))?
             as usize;
 
-        // Write input to linear memory
         memory.data_mut(&mut store)[input_ptr..input_ptr + input_bytes.len()]
             .copy_from_slice(input_bytes);
 
-        // Execute guest handler
         let handler_fn = instance
             .get_typed_func::<(i32, i32), i64>(&mut store, "on_slash_command")
             .map_err(|_| {
@@ -251,7 +261,7 @@ impl DynamicPluginEngine {
         }
     }
 
-    /// Executes incoming HTTP webhook requests routed to `/api/plugins/:id/*path`
+    /// Executes incoming HTTP webhook requests routed to `/api/plugins/:id/*path`.
     pub fn execute_http_request(
         &self,
         plugin_name: &str,
@@ -273,12 +283,9 @@ impl DynamicPluginEngine {
             .set_fuel(1_000_000)
             .map_err(|e| AegisError::PluginError(e.to_string()))?;
 
-        let linker = Linker::new(&self.engine);
-        let module = Module::new(&self.engine, &plugin.wasm_bytes)
-            .map_err(|e| AegisError::PluginError(e.to_string()))?;
-
+        let linker = self.build_linker()?;
         let instance = linker
-            .instantiate(&mut store, &module)
+            .instantiate(&mut store, &plugin.module)
             .map_err(|e| AegisError::PluginError(e.to_string()))?;
 
         let memory = instance
@@ -331,52 +338,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sandboxed_wasm_execution_and_fuel_bounding() {
+    fn test_sandboxed_wasm_execution_with_host_entropy() {
         let engine = DynamicPluginEngine::new();
 
-        // 1. A perfectly valid WAT that uses raw memory initialization
         let wat = r#"
             (module
+                (import "env" "host_random_u32" (func $host_random_u32 (result i32)))
                 (memory (export "memory") 1)
                 
-                ;; Embed manifest JSON at offset 0 (Length: 78)
-                (data (i32.const 0) "{\"name\":\"test_plugin\",\"slash_commands\":[{\"name\":\"ping\",\"description\":\"Pong\"}]}")
-                
-                ;; Embed reply at offset 100 (Length: 15)
-                (data (i32.const 100) "Pong from WASM!")
+                (data (i32.const 0) "{\"name\":\"test_flip\",\"slash_commands\":[{\"name\":\"flip\",\"description\":\"Flip\"}]}")
+                (data (i32.const 100) "HEADS")
+                (data (i32.const 200) "TAILS")
                 
                 (func (export "alloc") (param i32) (result i32)
                     i32.const 500
                 )
-
-                ;; Returns offset 0, length 78 -> (0 << 32) | 78 = 78
                 (func (export "get_manifest") (result i64)
                     i64.const 78
                 )
-
-                ;; Returns offset 100, length 15 -> (100 << 32) | 15 = 429496729615
                 (func (export "on_slash_command") (param i32 i32) (result i64)
-                    i64.const 429496729615
+                    (if (result i64) (i32.eq (i32.and (call $host_random_u32) (i32.const 1)) (i32.const 0))
+                        (then i64.const 429496729605)  ;; (100 << 32) | 5 -> HEADS
+                        (else i64.const 858993459205)  ;; (200 << 32) | 5 -> TAILS
+                    )
                 )
             )
         "#;
 
         let wasm_bytes = wat::parse_str(wat).expect("WAT parse failed");
-
-        // 2. Hot-swap the plugin (this calls get_manifest)
         let manifest = engine
-            .hot_swap_plugin("test_plugin", &wasm_bytes)
+            .hot_swap_plugin("test_flip", &wasm_bytes)
             .expect("Hot swap failed");
+        assert_eq!(manifest.name, "test_flip");
 
-        assert_eq!(manifest.name, "test_plugin");
-        assert_eq!(manifest.slash_commands.len(), 1);
-        assert_eq!(manifest.slash_commands[0].name, "ping");
+        let mut seen_heads = false;
+        let mut seen_tails = false;
 
-        // 3. Execute the slash command
-        let reply = engine
-            .execute_slash_command("test_plugin", "ping", "{}")
-            .expect("Command execution failed");
+        for _ in 0..50 {
+            let res = engine
+                .execute_slash_command("test_flip", "flip", "{}")
+                .unwrap();
+            if res == "HEADS" {
+                seen_heads = true;
+            }
+            if res == "TAILS" {
+                seen_tails = true;
+            }
+        }
 
-        assert_eq!(reply, "Pong from WASM!");
+        assert!(
+            seen_heads && seen_tails,
+            "Host entropy must produce both HEADS and TAILS outcomes"
+        );
     }
 }

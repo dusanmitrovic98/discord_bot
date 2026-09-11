@@ -37,12 +37,12 @@ async fn main() {
     .expect("Fatal: BotContainer bootstrap failed");
 
     // =========================================================================
-    // BACKGROUND DYNAMIC SYNCHRONIZER (Updates RAM rules every 5s with NO reboots!)
+    // BACKGROUND DYNAMIC SYNCHRONIZER (Throttled to 30s to spare MongoDB Atlas)
     // =========================================================================
     let sync_c = container.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
 
             // 1. Sync Dynamic Regexes
             if let Ok(rules) = sync_c.db.fetch_dynamic_rules().await {
@@ -50,13 +50,22 @@ async fn main() {
                 let _ = sync_c.gatekeeper.reload_dynamic_patterns(&patterns);
             }
 
-            // 2. Sync Whitelist
+            // 2. Sync Whitelist (Silent in stdout)
             let _ = sync_c.whitelist.sync_from_db(&sync_c.db).await;
 
             // 3. Sync Blacklisted dHashes
             if let Ok(dhashes) = sync_c.db.fetch_all_dhashes().await {
                 let mut guard = sync_c.blacklisted_dhashes.write().await;
                 *guard = dhashes;
+            }
+
+            // 4. Sync WASM Community Plugins dynamically into RAM!
+            if let Ok(records) = sync_c.db.fetch_all_plugin_records().await {
+                for p in records.into_iter().filter(|r| r.enabled) {
+                    let _ = sync_c
+                        .plugin_engine
+                        .hot_swap_plugin(&p.name, &p.bytecode.bytes);
+                }
             }
         }
     });

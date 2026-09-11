@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
 
 use crate::db::DatabaseEngine;
 use crate::Result;
@@ -48,7 +47,8 @@ impl WhitelistRegistry {
         let mut i_guard = self.images.write().await;
         *i_guard = image_set;
 
-        info!(
+        // Replace info! with debug! to eradicate 17,000 spam lines per day
+        tracing::debug!(
             "Whitelist synchronized into RAM: {} users, {} verified safe image hashes.",
             u_guard.len(),
             i_guard.len()
