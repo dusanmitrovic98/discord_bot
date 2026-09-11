@@ -5,6 +5,7 @@
 //! cryptographic binary signatures from MongoDB Atlas, captures real-time application
 //! logs in RAM, and exposes the HTTP web management console.
 
+use axum::http::header;
 use rand::RngCore;
 use std::env;
 use std::net::SocketAddr;
@@ -63,11 +64,16 @@ async fn main() {
         log_buffer: log_buffer.clone(),
     };
 
-    // 4. Configure Multi-Port Permissive CORS for Workstation Dev (Ports 8000, 10000, etc.)
+    // 4. Configure W3C-Compliant CORS for Workstation Dev (Ports 8000, 10000, etc.)
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
         .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::ACCEPT,
+            header::COOKIE,
+        ])
         .allow_credentials(true);
 
     let port: u16 = env::var("PORT")
