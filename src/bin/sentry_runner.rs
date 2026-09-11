@@ -6,12 +6,13 @@
 //! logs in RAM, and exposes the HTTP web management console.
 
 use axum::http::header;
+use axum::http::Method;
 use rand::RngCore;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -64,10 +65,9 @@ async fn main() {
         log_buffer: log_buffer.clone(),
     };
 
-    // 4. Configure W3C-Compliant CORS for Workstation Dev (Ports 8000, 10000, etc.)
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
-        .allow_methods(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
