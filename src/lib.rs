@@ -8,6 +8,7 @@ pub mod pipeline;
 pub mod plugin_engine;
 pub mod queue;
 pub mod supervisor;
+pub mod telemetry;
 pub mod web;
 pub mod whitelist;
 

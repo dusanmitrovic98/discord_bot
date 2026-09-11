@@ -212,9 +212,10 @@ pub async fn add_whitelisted_image(
     if let Ok(resp) = client.get(&payload.url).send().await {
         if let Ok(bytes) = resp.bytes().await {
             let sha256 = CryptoEngine::sha256(&bytes);
+            let dhash = CryptoEngine::compute_dhash(&bytes).unwrap_or(0);
             let _ = state
                 .db
-                .add_whitelisted_image(&sha256, &payload.label, "Console")
+                .add_whitelisted_image(&sha256, dhash, &payload.label, "Console")
                 .await;
             return StatusCode::CREATED.into_response();
         }
@@ -275,6 +276,12 @@ pub async fn blacklist_image(
 pub async fn revoke_image(State(state): State<AppState>, Query(q): Query<QuerySha>) -> Response {
     let _ = state.db.revoke_blacklisted_image(&q.sha256).await;
     StatusCode::OK.into_response()
+}
+
+pub async fn get_live_logs(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::telemetry::LiveLogEntry>> {
+    Json(state.log_buffer.get_entries())
 }
 
 // =============================================================================

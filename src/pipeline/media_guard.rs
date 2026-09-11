@@ -11,7 +11,6 @@ pub enum MediaVerdict {
     QueuedForInference(tokio::sync::oneshot::Receiver<Result<crate::queue::ClassifierResponse>>),
 }
 
-/// Evaluates media payload through In-Memory Whitelist -> In-Memory dHash/SHA -> AI Queue (5 arguments, NASA Rule 4)
 pub async fn triage_media(
     c: &BotContainer,
     payload: &MediaPayload,
@@ -19,11 +18,14 @@ pub async fn triage_media(
     guild_id: u64,
     media_url: String,
 ) -> Result<MediaVerdict> {
-    // 1. In-Memory Whitelist Check (Fast-path 0ms bypass)
-    if c.whitelist.is_image_safe(&payload.sha256).await {
+    // 1. In-Memory Whitelist Check (Fast-path SHA & Perceptual dHash <= 2)
+    if c.whitelist
+        .is_image_safe(&payload.sha256, payload.dhash)
+        .await
+    {
         info!(
-            "🟢 [WHITELIST] Media {} is verified safe. Bypassing scan.",
-            payload.sha256
+            "🟢 [WHITELIST] Media {} (dHash: {:016x}) is verified safe. Bypassing scan.",
+            payload.sha256, payload.dhash
         );
         return Ok(MediaVerdict::Safe);
     }

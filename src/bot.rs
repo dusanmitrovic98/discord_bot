@@ -316,7 +316,11 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
 async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> bool {
     if let Some(avatar_url) = msg.author.avatar_url() {
         if let Ok(payload) = c.media_inspector.inspect_url(&avatar_url).await {
-            if !c.whitelist.is_image_safe(&payload.sha256).await
+            // Check dual-layer whitelist (SHA + dHash)
+            if !c
+                .whitelist
+                .is_image_safe(&payload.sha256, payload.dhash)
+                .await
                 && c.db
                     .is_image_blacklisted(&payload.sha256)
                     .await
@@ -687,7 +691,10 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
         return;
     };
 
-    let is_whitelisted = c.whitelist.is_image_safe(&payload.sha256).await;
+    let is_whitelisted = c
+        .whitelist
+        .is_image_safe(&payload.sha256, payload.dhash)
+        .await;
     let is_blacklisted =
         c.db.is_image_blacklisted(&payload.sha256)
             .await
@@ -837,13 +844,19 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
     if let Ok(payload) = c.media_inspector.inspect_url(&url).await {
         let label = format!("PFP Whitelist: @{}", target_name);
         let _ =
-            c.db.add_whitelisted_image(&payload.sha256, &label, &cmd.user.name)
+            c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
                 .await;
-        c.whitelist.add_image(&payload.sha256).await;
+        c.whitelist.add_image(&payload.sha256, payload.dhash).await;
+
+        // Evict from RAM blacklisted dHashes mirror immediately
+        if payload.dhash != 0 {
+            let mut guard = c.blacklisted_dhashes.write().await;
+            guard.retain(|&banned| (banned ^ payload.dhash).count_ones() > 6);
+        }
 
         let reply = format!(
-            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n*This image will permanently skip AI classification and message deletions.*",
-            target_id, payload.sha256
+            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n*This image and its resized variants will permanently bypass all filters.*",
+            target_id, payload.sha256, payload.dhash
         );
         let _ = cmd
             .create_response(

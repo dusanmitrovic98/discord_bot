@@ -3,270 +3,318 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aegis Bastion // Sovereign Defense Console</title>
+    <title>Sebastian The Butler // Command Console</title>
     <style>
         :root {
-            --bg: #1c1e20;
-            --surface: #25282b;
-            --surface-hover: #2b2f33;
-            --border: #34383c;
-            --primary: #d25a3f;
-            --primary-hover: #e0684c;
-            --text-main: #f0f2f5;
-            --text-muted: #9da4ac;
-            --danger: #e74c3c;
-            --success: #27ae60;
+            --bg-base: #090a0d;
+            --bg-surface: #121418;
+            --bg-elevated: #1a1d22;
+            --border: #262930;
+            --border-active: #3a3f4a;
+            --text: #f3f4f6;
+            --text-muted: #9ca3af;
+            --primary: #e05638;
+            --primary-hover: #ff6b4a;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-        body { background: var(--bg); color: var(--text-main); min-height: 100vh; display: flex; flex-direction: column; }
-        header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; }
-        .logo { font-size: 1.1rem; font-weight: 800; letter-spacing: 1px; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
-        .logo span { color: var(--primary); }
-        .user-nav { display: flex; align-items: center; gap: 16px; font-size: 0.9rem; }
-        .badge { background: #34383c; padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; text-transform: uppercase; font-weight: 700; color: var(--primary); }
-        .container { max-width: 1200px; margin: 0 auto; width: 100%; padding: 32px 20px; flex: 1; }
-        .breadcrumb { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 24px; display: flex; gap: 8px; }
-        .breadcrumb span { color: var(--text-main); font-weight: 600; }
-        h1 { font-size: 2.2rem; font-weight: 800; margin-bottom: 12px; letter-spacing: -0.5px; }
-        .lead { color: var(--text-muted); margin-bottom: 32px; font-size: 1.05rem; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: var(--bg-base); color: var(--text); font-family: var(--font-sans); min-height: 100vh; display: flex; flex-direction: column; }
         
-        /* Refactoring.Guru Modular Grid */
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin-bottom: 36px; }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 20px; cursor: pointer; transition: all 0.2s ease; position: relative; }
-        .card:hover { border-color: #555b63; background: var(--surface-hover); transform: translateY(-2px); }
-        .card.active { border-color: var(--primary); }
-        .card-icon { font-size: 1.6rem; margin-bottom: 12px; }
-        .card-title { font-size: 1.15rem; font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
-        .card-desc { color: var(--text-muted); font-size: 0.82rem; line-height: 1.4; }
+        /* Top Navigation Bar */
+        header { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 0 24px; height: 56px; display: flex; justify-content: space-between; align-items: center; }
+        .brand { font-size: 0.95rem; font-weight: 800; letter-spacing: 0.5px; display: flex; align-items: center; gap: 10px; }
+        .brand span { color: var(--primary); }
+        .nav-links { display: flex; height: 100%; }
+        .nav-item { background: none; border: none; color: var(--text-muted); padding: 0 16px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; height: 100%; transition: all 0.15s; }
+        .nav-item:hover { color: var(--text); }
+        .nav-item.active { color: var(--text); border-bottom-color: var(--primary); }
+        .user-status { display: flex; align-items: center; gap: 12px; font-size: 0.82rem; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; }
 
-        .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 28px; margin-bottom: 32px; }
-        .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-        .panel-title { font-size: 1.2rem; font-weight: 700; }
-
-        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
-        th { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--text-muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px; }
-        td { padding: 14px 16px; border-bottom: 1px solid #2d3135; vertical-align: middle; }
-        input, select { background: #16181a; border: 1px solid var(--border); padding: 10px 14px; border-radius: 4px; color: #fff; font-size: 0.9rem; outline: none; }
+        /* Main View Container */
+        main { flex: 1; padding: 24px; max-width: 1600px; width: 100%; margin: 0 auto; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        
+        .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+        .panel-title { font-size: 1.15rem; font-weight: 700; }
+        
+        /* Tables */
+        .table-wrap { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; }
+        th { background: var(--bg-elevated); padding: 12px 16px; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+        td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        tr:last-child td { border-bottom: none; }
+        
+        /* Inputs & Buttons */
+        .form-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+        input, select { background: var(--bg-surface); border: 1px solid var(--border); color: #fff; padding: 9px 14px; border-radius: 4px; font-size: 0.85rem; outline: none; }
         input:focus { border-color: var(--primary); }
-        .btn { background: var(--primary); color: #fff; border: none; padding: 10px 18px; border-radius: 4px; font-weight: 600; cursor: pointer; transition: 0.15s; font-size: 0.9rem; }
+        .btn { background: var(--primary); color: #fff; border: none; padding: 9px 16px; border-radius: 4px; font-weight: 600; font-size: 0.82rem; cursor: pointer; transition: 0.15s; }
         .btn:hover { background: var(--primary-hover); }
-        .btn-success { background: #27ae60; }
-        .btn-success:hover { background: #2ecc71; }
-        .btn-danger { background: #c0392b; }
-        .btn-danger:hover { background: #e74c3c; }
-        .btn-sm { padding: 6px 12px; font-size: 0.8rem; }
-        .form-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-        
+        .btn-success { background: var(--success); }
+        .btn-danger { background: var(--danger); }
+        .btn-sm { padding: 5px 10px; font-size: 0.75rem; }
+
+        /* High-Contrast Monospace Terminal */
+        .terminal-container { background: #050608; border: 1px solid var(--border); border-radius: 6px; display: flex; flex-direction: column; height: calc(100vh - 170px); min-height: 550px; font-family: var(--font-mono); }
+        .terminal-header { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; }
+        .terminal-controls { display: flex; gap: 8px; align-items: center; }
+        .terminal-body { flex: 1; overflow-y: auto; padding: 16px; font-size: 0.82rem; line-height: 1.6; }
+        .log-row { display: flex; gap: 12px; margin-bottom: 3px; }
+        .log-time { color: #6b7280; flex-shrink: 0; }
+        .log-lvl { font-weight: bold; flex-shrink: 0; min-width: 48px; }
+        .lvl-INFO { color: #10b981; }
+        .lvl-WARN { color: #f59e0b; }
+        .lvl-ERROR { color: #ef4444; }
+        .lvl-DEBUG { color: #6366f1; }
+        .log-target { color: #a78bfa; flex-shrink: 0; }
+        .log-text { color: #e5e7eb; word-break: break-all; }
+
+        /* Auth Modal */
         #auth-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; }
-        .auth-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; width: 100%; max-width: 400px; padding: 36px; }
-        .auth-title { font-size: 1.5rem; font-weight: 800; margin-bottom: 8px; }
-        .auth-desc { color: var(--text-muted); font-size: 0.88rem; margin-bottom: 24px; }
+        .auth-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px; width: 100%; max-width: 380px; padding: 32px; }
     </style>
 </head>
 <body>
 
+    <!-- AUTHENTICATION MODAL -->
     <div id="auth-modal" style="display: none;">
-        <div class="auth-box">
-            <div class="auth-title" id="auth-box-title">System Setup</div>
-            <div class="auth-desc" id="auth-box-desc">Create the Master Admin account to take command.</div>
-            <form id="auth-form" onsubmit="handleAuth(event)">
-                <div style="margin-bottom: 16px;">
-                    <label style="display:block; font-size: 0.8rem; margin-bottom: 6px; color: var(--text-muted);">USERNAME</label>
+        <div class="auth-card">
+            <h2 id="auth-title" style="margin-bottom: 6px; font-size: 1.25rem;">Command Authorization</h2>
+            <p id="auth-desc" style="color: var(--text-muted); font-size: 0.82rem; margin-bottom: 20px;">Provide credentials to access Sebastian's command console.</p>
+            <form onsubmit="handleAuth(event)">
+                <div style="margin-bottom: 14px;">
+                    <label style="display:block; font-size: 0.75rem; margin-bottom: 6px; color: var(--text-muted);">USERNAME</label>
                     <input type="text" id="auth-username" style="width: 100%;" required>
                 </div>
-                <div style="margin-bottom: 24px;">
-                    <label style="display:block; font-size: 0.8rem; margin-bottom: 6px; color: var(--text-muted);">PASSWORD</label>
+                <div style="margin-bottom: 20px;">
+                    <label style="display:block; font-size: 0.75rem; margin-bottom: 6px; color: var(--text-muted);">PASSWORD</label>
                     <input type="password" id="auth-password" style="width: 100%;" required>
                 </div>
-                <button type="submit" class="btn" style="width: 100%;" id="auth-submit-btn">Initialize Sovereign Admin</button>
+                <button type="submit" class="btn" style="width: 100%;" id="auth-btn">Authenticate</button>
             </form>
         </div>
     </div>
 
+    <!-- TOP HEADER -->
     <header>
-        <div class="logo">
-            <span>🛡️ AEGIS BASTION</span> // COMMAND CONSOLE
+        <div class="brand">Sebastian The Butler</div>
+        <div class="nav-links">
+            <button class="nav-item active" onclick="showTab('terminal')">Live Logs</button>
+            <button class="nav-item" onclick="showTab('rules')">Threat Rules</button>
+            <button class="nav-item" onclick="showTab('wl-users')">Whitelisted Users</button>
+            <button class="nav-item" onclick="showTab('wl-media')">Whitelisted Media</button>
+            <button class="nav-item" onclick="showTab('blacklist')">Blacklisted Media</button>
+            <button class="nav-item" onclick="showTab('plugins')">Plugins</button>
+            <button class="nav-item" onclick="showTab('audits')">Audit Logs</button>
+            <button class="nav-item" onclick="showTab('operators')">Operators</button>
         </div>
-        <div class="user-nav">
+        <div class="user-status">
+            <span class="status-dot"></span>
             <span id="user-display">Connecting...</span>
-            <span class="badge" id="role-display">AUTH</span>
-            <button class="btn btn-sm" onclick="logout()" id="logout-btn" style="display: none;">Logout</button>
+            <button class="btn btn-sm btn-danger" onclick="logout()" id="logout-btn" style="display: none;">Logout</button>
         </div>
     </header>
 
-    <div class="container">
-        <div class="breadcrumb">
-            Root / <span>Command Center</span> / Overview
-        </div>
-
-        <h1>Defense Architecture & Control</h1>
-        <p class="lead">Autonomous threat neutralization, microkernel plugin orchestration, and live overrides.</p>
-
-        <div class="grid">
-            <div class="card active" onclick="switchTab('regex')">
-                <div class="card-icon">⚙️</div>
-                <div class="card-title">Threat Studio <span class="badge">FAST-PATH</span></div>
-                <div class="card-desc">Manage hardcoded and dynamic threat regexes.</div>
-            </div>
-            <div class="card" onclick="switchTab('whitelist')">
-                <div class="card-icon">🟢</div>
-                <div class="card-title">Whitelist Studio <span class="badge" style="color: #27ae60;">OVERRIDES</span></div>
-                <div class="card-desc">Exempt specific usernames and verify safe image hashes.</div>
-            </div>
-            <div class="card" onclick="switchTab('images')">
-                <div class="card-icon">🖼️</div>
-                <div class="card-title">Image Blacklist <span class="badge">dHash</span></div>
-                <div class="card-desc">Blacklist logos like the Mega 'M' via SHA256 & dHash.</div>
-            </div>
-            <div class="card" onclick="switchTab('plugins')">
-                <div class="card-icon">🧩</div>
-                <div class="card-title">Community Plugins <span class="badge" style="color: #9b59b6;">OBSIDIAN</span></div>
-                <div class="card-desc">Install WASM modules for dynamic commands and webhooks.</div>
-            </div>
-            <div class="card" onclick="switchTab('audits')">
-                <div class="card-icon">📋</div>
-                <div class="card-title">Audit Ledger <span class="badge">1-CLICK</span></div>
-                <div class="card-desc">Live incident logs with 1-click unblock overrides.</div>
-            </div>
-            <div class="card" onclick="switchTab('users')">
-                <div class="card-icon">👥</div>
-                <div class="card-title">Access Control <span class="badge">RBAC</span></div>
-                <div class="card-desc">Provision moderator credentials securely.</div>
+    <main>
+        <!-- TAB 1: LIVE RENDER LOGS -->
+        <div id="view-terminal" class="view-panel active">
+            <div class="terminal-container">
+                <div class="terminal-header">
+                    <div><strong>APPLICATION LOG STREAM</strong></div>
+                    <div class="terminal-controls">
+                        <input type="text" id="log-search" placeholder="Filter logs..." oninput="renderLogs()" style="padding: 4px 10px; font-size: 0.75rem;">
+                        <select id="log-level-filter" onchange="renderLogs()" style="padding: 4px 8px; font-size: 0.75rem;">
+                            <option value="ALL">ALL LEVELS</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARN">WARN</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <button class="btn btn-sm" onclick="fetchLogs()">Refresh</button>
+                        <button class="btn btn-sm" onclick="clearTerminal()">Clear</button>
+                    </div>
+                </div>
+                <div class="terminal-body" id="terminal-body">
+                    <div class="log-row"><span class="log-time">[Init]</span> <span class="log-lvl lvl-INFO">INFO</span> <span class="log-text">Connecting to real-time log engine...</span></div>
+                </div>
             </div>
         </div>
 
-        <!-- TAB: THREAT REGEX STUDIO -->
-        <div class="panel" id="tab-regex">
-            <div class="panel-header">
-                <div class="panel-title">Dynamic Regex Studio (Live Hot-Path)</div>
-            </div>
-            <form onsubmit="addRegexRule(event)" class="form-row">
-                <input type="text" id="new-rule-pattern" placeholder="e.g. (?i)l+i+n+k+" style="flex: 2;" required>
-                <input type="text" id="new-rule-desc" placeholder="Rule Description" style="flex: 2;" required>
+        <!-- TAB 2: THREAT RULES -->
+        <div id="view-rules" class="view-panel">
+            <div class="panel-head"><div class="panel-title">Dynamic Threat Patterns</div></div>
+            <form onsubmit="addRule(event)" class="form-row">
+                <input type="text" id="new-rule-pattern" placeholder="Regex Pattern (e.g. (?i)discord.*gift)" style="flex: 3;" required>
+                <input type="text" id="new-rule-desc" placeholder="Description" style="flex: 3;" required>
                 <select id="new-rule-action" style="flex: 1;">
-                    <option value="delete">Delete Message Only (Soft)</option>
+                    <option value="delete">Delete Message (Soft)</option>
                     <option value="ban">Instant Ban (Predator)</option>
                 </select>
-                <button type="submit" class="btn">+ Add Dynamic Rule</button>
+                <button type="submit" class="btn">+ Add Rule</button>
             </form>
-            <table>
-                <thead><tr><th>Type</th><th>Pattern</th><th>Description</th><th>Action</th><th>Status</th><th>Action</th></tr></thead>
-                <tbody id="rules-tbody"><tr><td colspan="6" style="text-align: center;">Loading rules...</td></tr></tbody>
-            </table>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Pattern</th><th>Description</th><th>Action</th><th>Status</th><th>Operation</th></tr></thead>
+                    <tbody id="rules-tbody"><tr><td colspan="5">Loading rules...</td></tr></tbody>
+                </table>
+            </div>
         </div>
 
-        <!-- TAB: WHITELIST STUDIO -->
-        <div class="panel" id="tab-whitelist" style="display: none;">
-            <div class="panel-header">
-                <div class="panel-title">Whitelisted Users (Soft Filter Bypass)</div>
-            </div>
-            <form onsubmit="addWhitelistedUser(event)" class="form-row">
-                <input type="text" id="new-wl-user" placeholder="Username or User ID" style="flex: 2;" required>
-                <input type="text" id="new-wl-reason" placeholder="Reason (e.g. Steam game dev)" style="flex: 3;" required>
+        <!-- TAB 3: WHITELISTED USERS -->
+        <div id="view-wl-users" class="view-panel">
+            <div class="panel-head"><div class="panel-title">Whitelisted Users</div></div>
+            <form onsubmit="addWlUser(event)" class="form-row">
+                <input type="text" id="new-wl-user" placeholder="User Snowflake or Name" style="flex: 2;" required>
+                <input type="text" id="new-wl-reason" placeholder="Reason (e.g. Verified Dev)" style="flex: 3;" required>
                 <button type="submit" class="btn btn-success">+ Whitelist User</button>
             </form>
-            <table>
-                <thead><tr><th>Identifier</th><th>Reason</th><th>Added By</th><th>Action</th></tr></thead>
-                <tbody id="wl-users-tbody"><tr><td colspan="4" style="text-align: center;">Loading whitelisted users...</td></tr></tbody>
-            </table>
-
-            <div class="panel-header" style="margin-top: 32px;">
-                <div class="panel-title">Whitelisted Images (Verified Safe Hashes)</div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Identifier</th><th>Reason</th><th>Added By</th><th>Operation</th></tr></thead>
+                    <tbody id="wl-users-tbody"><tr><td colspan="4">Loading whitelisted users...</td></tr></tbody>
+                </table>
             </div>
-            <form onsubmit="addWhitelistedImage(event)" class="form-row">
-                <input type="url" id="new-wl-image-url" placeholder="Image URL to mark as safe" style="flex: 3;" required>
-                <input type="text" id="new-wl-image-label" placeholder="Label (e.g. Server Banner)" style="flex: 2;" required>
-                <button type="submit" class="btn btn-success">+ Whitelist Image</button>
-            </form>
-            <table>
-                <thead><tr><th>Label</th><th>SHA-256 Hash</th><th>Added By</th><th>Action</th></tr></thead>
-                <tbody id="wl-images-tbody"><tr><td colspan="4" style="text-align: center;">Loading whitelisted images...</td></tr></tbody>
-            </table>
         </div>
 
-        <!-- TAB: IMAGE BLACKLIST -->
-        <div class="panel" id="tab-images" style="display: none;">
-            <div class="panel-header">
-                <div class="panel-title">Perceptual Image & Logo Blacklist (Logo Annihilator)</div>
-            </div>
-            <form onsubmit="blacklistImage(event)" class="form-row">
-                <input type="url" id="new-image-url" placeholder="Paste image URL (e.g. Mega 'M' logo URL)" style="flex: 3;" required>
-                <input type="text" id="new-image-label" placeholder="Label (e.g. Mega 'M' Icon)" style="flex: 2;" required>
-                <button type="submit" class="btn">+ Blacklist Image Signature</button>
+        <!-- TAB 4: WHITELISTED MEDIA -->
+        <div id="view-wl-media" class="view-panel">
+            <div class="panel-head"><div class="panel-title">Whitelisted Media</div></div>
+            <form onsubmit="addWlMedia(event)" class="form-row">
+                <input type="url" id="new-wl-media-url" placeholder="Image URL (Downloads & computes SHA-256 and dHash)" style="flex: 3;" required>
+                <input type="text" id="new-wl-media-label" placeholder="Label (e.g. Server Banner)" style="flex: 2;" required>
+                <button type="submit" class="btn btn-success">+ Whitelist Media</button>
             </form>
-            <table>
-                <thead><tr><th>Label</th><th>SHA-256 Signature</th><th>Perceptual dHash</th><th>Added By</th><th>Action</th></tr></thead>
-                <tbody id="images-tbody"><tr><td colspan="5" style="text-align: center;">Loading signatures...</td></tr></tbody>
-            </table>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Label</th><th>SHA-256 Hash</th><th>dHash</th><th>Added By</th><th>Operation</th></tr></thead>
+                    <tbody id="wl-media-tbody"><tr><td colspan="5">Loading whitelisted media...</td></tr></tbody>
+                </table>
+            </div>
         </div>
 
-        <!-- TAB: COMMUNITY PLUGINS -->
-        <div class="panel" id="tab-plugins" style="display: none;">
-            <div class="panel-header">
-                <div class="panel-title">WASM Community Plugins (Microkernel Extension)</div>
+        <!-- TAB 5: BLACKLISTED MEDIA -->
+        <div id="view-blacklist" class="view-panel">
+            <div class="panel-head"><div class="panel-title">Blacklisted Media</div></div>
+            <form onsubmit="addBlacklistMedia(event)" class="form-row">
+                <input type="url" id="new-bl-media-url" placeholder="Paste media URL to blacklist" style="flex: 3;" required>
+                <input type="text" id="new-bl-media-label" placeholder="Label (e.g. Raid Group Logo)" style="flex: 2;" required>
+                <button type="submit" class="btn btn-danger">+ Blacklist Signature</button>
+            </form>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Label</th><th>SHA-256 Signature</th><th>Perceptual dHash</th><th>Added By</th><th>Operation</th></tr></thead>
+                    <tbody id="blacklist-tbody"><tr><td colspan="5">Loading blacklist signatures...</td></tr></tbody>
+                </table>
             </div>
+        </div>
+
+        <!-- TAB 6: WASM PLUGINS -->
+        <div id="view-plugins" class="view-panel">
+            <div class="panel-head"><div class="panel-title">WebAssembly Community Plugins</div></div>
             <form onsubmit="uploadPlugin(event)" class="form-row">
-                <input type="text" id="new-plugin-name" placeholder="Plugin Identifier (e.g. coinflip_cmd)" style="flex: 2;" required>
-                <input type="text" id="new-plugin-wasm" placeholder="Base64 or Hex of .wasm file" style="flex: 3;" required>
-                <button type="submit" class="btn" style="background: #9b59b6;">+ Install Plugin</button>
+                <input type="text" id="new-plugin-name" placeholder="Plugin Identifier (e.g. coinflip)" style="flex: 2;" required>
+                <input type="text" id="new-plugin-wasm" placeholder="Base64 or Hex encoded .wasm binary" style="flex: 4;" required>
+                <button type="submit" class="btn">+ Install Plugin</button>
             </form>
-            <table>
-                <thead><tr><th>Plugin Name</th><th>Commands</th><th>Webhooks</th><th>Payload</th><th>Status</th><th>Action</th></tr></thead>
-                <tbody id="plugins-tbody"><tr><td colspan="6" style="text-align: center;">Loading plugins...</td></tr></tbody>
-            </table>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Identifier</th><th>Commands</th><th>Payload</th><th>State</th><th>Operation</th></tr></thead>
+                    <tbody id="plugins-tbody"><tr><td colspan="5">Loading plugins...</td></tr></tbody>
+                </table>
+            </div>
         </div>
 
-        <!-- TAB: AUDIT LEDGER -->
-        <div class="panel" id="tab-audits" style="display: none;">
-            <div class="panel-header">
-                <div class="panel-title">Live Moderation Audit Ledger</div>
+        <!-- TAB 7: AUDIT LOGS -->
+        <div id="view-audits" class="view-panel">
+            <div class="panel-head"><div class="panel-title">Moderation Audit Logs</div></div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Timestamp</th><th>User ID</th><th>Target User</th><th>Reason</th><th>Confidence</th><th>1-Click Action</th></tr></thead>
+                    <tbody id="audits-tbody"><tr><td colspan="6">Loading audit logs...</td></tr></tbody>
+                </table>
             </div>
-            <table>
-                <thead><tr><th>Timestamp</th><th>User ID</th><th>Target User</th><th>Reason</th><th>Confidence</th><th>1-Click Action</th></tr></thead>
-                <tbody id="audits-tbody"><tr><td colspan="6" style="text-align: center;">Loading audit stream...</td></tr></tbody>
-            </table>
         </div>
 
-        <!-- TAB: ACCESS CONTROL -->
-        <div class="panel" id="tab-users" style="display: none;">
-            <div class="panel-header">
-                <div class="panel-title">Moderator Credentials (Argon2id)</div>
-            </div>
-            <form onsubmit="createModerator(event)" class="form-row">
-                <input type="text" id="new-mod-username" placeholder="Moderator Username" style="flex: 1;" required>
-                <input type="password" id="new-mod-password" placeholder="Temporary Password" style="flex: 1;" required>
-                <button type="submit" class="btn">+ Create Moderator</button>
+        <!-- TAB 8: OPERATORS -->
+        <div id="view-operators" class="view-panel">
+            <div class="panel-head"><div class="panel-title">Operator Accounts</div></div>
+            <form onsubmit="createOperator(event)" class="form-row">
+                <input type="text" id="new-op-user" placeholder="Operator Username" style="flex: 1;" required>
+                <input type="password" id="new-op-pass" placeholder="Password" style="flex: 1;" required>
+                <button type="submit" class="btn">+ Create Operator</button>
             </form>
-            <table>
-                <thead><tr><th>Username</th><th>Role</th><th>Created At</th></tr></thead>
-                <tbody id="users-tbody"><tr><td colspan="3" style="text-align: center;">Loading users...</td></tr></tbody>
-            </table>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Username</th><th>Role</th><th>Created At</th></tr></thead>
+                    <tbody id="operators-tbody"><tr><td colspan="3">Loading operators...</td></tr></tbody>
+                </table>
+            </div>
         </div>
-    </div>
+    </main>
 
     <script>
-        let currentUser = null;
+        // Automatic Multi-Port Discovery: Connects whether running on port 8000, 10000, or Render
+        const API = (window.location.port === '10000' || window.location.port === '443' || !window.location.port) 
+            ? '' 
+            : 'http://127.0.0.1:10000';
+
+        let rawLogs = [];
+
+        function showTab(id) {
+            document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+            
+            const target = document.getElementById('view-' + id);
+            if (target) target.classList.add('active');
+            
+            const btn = Array.from(document.querySelectorAll('.nav-item')).find(b => b.getAttribute('onclick').includes(`'${id}'`));
+            if (btn) btn.classList.add('active');
+
+            if (id === 'terminal') fetchLogs();
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return 'Just now';
+            if (typeof ts === 'string' || typeof ts === 'number') {
+                const d = new Date(ts);
+                return isNaN(d.getTime()) ? 'Just now' : d.toLocaleString();
+            }
+            if (ts.$date) {
+                const raw = ts.$date.$numberLong ? parseInt(ts.$date.$numberLong, 10) : ts.$date;
+                const d = new Date(raw);
+                return isNaN(d.getTime()) ? 'Just now' : d.toLocaleString();
+            }
+            return 'Just now';
+        }
+
+        function cleanMention(raw) {
+            if (!raw) return 'Unknown';
+            return '@' + raw.replace(/[<@!>]/g, '');
+        }
 
         async function init() {
-            const res = await fetch('/api/auth/status');
-            const data = await res.json();
-
-            if (!data.has_admin) {
-                document.getElementById('auth-modal').style.display = 'flex';
-                document.getElementById('auth-box-title').innerText = "Initialize Sovereign Admin";
-                document.getElementById('auth-box-desc').innerText = "No admin exists. The first account created will be Master Admin.";
-                document.getElementById('auth-submit-btn').innerText = "Create Master Admin";
-            } else if (!data.authenticated) {
-                document.getElementById('auth-modal').style.display = 'flex';
-                document.getElementById('auth-box-title').innerText = "Command Authorization";
-                document.getElementById('auth-box-desc').innerText = "Enter administrator or moderator credentials.";
-                document.getElementById('auth-submit-btn').innerText = "Authenticate";
-            } else {
-                currentUser = data.user;
-                document.getElementById('user-display').innerText = currentUser.username;
-                document.getElementById('role-display').innerText = currentUser.role.toUpperCase();
-                document.getElementById('logout-btn').style.display = 'inline-block';
-                loadData();
+            try {
+                const res = await fetch(`${API}/api/auth/status`, { credentials: 'include' });
+                const data = await res.json();
+                if (!data.has_admin) {
+                    document.getElementById('auth-modal').style.display = 'flex';
+                    document.getElementById('auth-title').innerText = "Initialize Sovereign Admin";
+                    document.getElementById('auth-btn').innerText = "Create Sovereign Admin";
+                } else if (!data.authenticated) {
+                    document.getElementById('auth-modal').style.display = 'flex';
+                } else {
+                    document.getElementById('user-display').innerText = `${data.user.username} (${data.user.role.toUpperCase()})`;
+                    document.getElementById('logout-btn').style.display = 'inline-block';
+                    loadData();
+                    startLogPolling();
+                }
+            } catch (err) {
+                document.getElementById('user-display').innerText = "Connecting...";
             }
         }
 
@@ -274,263 +322,335 @@
             e.preventDefault();
             const username = document.getElementById('auth-username').value;
             const password = document.getElementById('auth-password').value;
-
-            const res = await fetch('/api/auth/submit', {
+            const res = await fetch(`${API}/api/auth/submit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ username, password })
             });
-
-            if (res.ok) { location.reload(); } else { alert('Authentication failed.'); }
+            if (res.ok) location.reload(); else alert('Authentication failed.');
         }
 
         async function logout() {
-            await fetch('/api/auth/logout', { method: 'POST' });
+            await fetch(`${API}/api/auth/logout`, { method: 'POST', credentials: 'include' });
             location.reload();
         }
 
-        function switchTab(tab) {
-            ['regex', 'whitelist', 'images', 'plugins', 'audits', 'users'].forEach(t => {
-                document.getElementById('tab-' + t).style.display = t === tab ? 'block' : 'none';
-            });
-            document.querySelectorAll('.card').forEach((c, idx) => {
-                c.classList.toggle('active', ['regex', 'whitelist', 'images', 'plugins', 'audits', 'users'][idx] === tab);
-            });
-        }
-
-        async function loadData() {
+        function loadData() {
+            fetchLogs();
             loadRules();
             loadWhitelists();
-            loadImages();
+            loadBlacklist();
             loadPlugins();
             loadAudits();
-            loadUsers();
+            loadOperators();
         }
 
+        // --- REAL LIVE LOG STREAM ---
+        async function fetchLogs() {
+            try {
+                const res = await fetch(`${API}/api/logs`, { credentials: 'include' });
+                if (res.ok) {
+                    rawLogs = await res.json();
+                    renderLogs();
+                }
+            } catch (e) {}
+        }
+
+        function renderLogs() {
+            const body = document.getElementById('terminal-body');
+            const search = (document.getElementById('log-search').value || '').toLowerCase();
+            const filterLvl = document.getElementById('log-level-filter').value;
+            
+            const filtered = rawLogs.filter(l => {
+                if (filterLvl !== 'ALL' && l.level !== filterLvl) return false;
+                if (search && !l.message.toLowerCase().includes(search) && !l.target.toLowerCase().includes(search)) return false;
+                return true;
+            });
+
+            body.innerHTML = '';
+            if (filtered.length === 0) {
+                body.innerHTML = '<div class="log-row"><span class="log-time">[Idle]</span> <span class="log-lvl lvl-INFO">INFO</span> <span class="log-text">No matching logs found.</span></div>';
+                return;
+            }
+
+            filtered.forEach(l => {
+                const time = new Date(l.timestamp).toLocaleTimeString();
+                body.innerHTML += `
+                    <div class="log-row">
+                        <span class="log-time">[${time}]</span>
+                        <span class="log-lvl lvl-${l.level}">${l.level}</span>
+                        <span class="log-target">${l.target}:</span>
+                        <span class="log-text">${escapeHtml(l.message)}</span>
+                    </div>
+                `;
+            });
+            body.scrollTop = body.scrollHeight;
+        }
+
+        function clearTerminal() {
+            rawLogs = [];
+            renderLogs();
+        }
+
+        function startLogPolling() {
+            setInterval(() => {
+                if (document.getElementById('view-terminal').classList.contains('active')) {
+                    fetchLogs();
+                }
+            }, 2000);
+        }
+
+        function escapeHtml(s) {
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        // --- AUDIT LOGS ---
+        async function loadAudits() {
+            const res = await fetch(`${API}/api/audits`, { credentials: 'include' });
+            const data = await res.json();
+            const tbody = document.getElementById('audits-tbody');
+            tbody.innerHTML = '';
+            data.forEach(a => {
+                const clean = cleanMention(a.username);
+                const snowflake = a.user_id || a.username.replace(/[<@!>]/g, '');
+                tbody.innerHTML += `
+                    <tr>
+                        <td>${formatTimestamp(a.timestamp)}</td>
+                        <td><code>${a.user_id}</code></td>
+                        <td><b>${clean}</b></td>
+                        <td>${a.reason}</td>
+                        <td><b>${(a.confidence * 100).toFixed(1)}%</b></td>
+                        <td><button class="btn btn-sm btn-success" onclick="quickWhitelist('${snowflake}')">✓ Whitelist</button></td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function quickWhitelist(id) {
+            const reason = prompt('Reason for whitelisting user:', 'Audit Override');
+            if (reason) {
+                await fetch(`${API}/api/whitelist/users`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ identifier: id, reason })
+                });
+                alert(`User ${id} whitelisted.`);
+                loadWhitelists();
+            }
+        }
+
+        // --- THREAT RULES ---
         async function loadRules() {
-            const res = await fetch('/api/rules');
+            const res = await fetch(`${API}/api/rules`, { credentials: 'include' });
             const data = await res.json();
             const tbody = document.getElementById('rules-tbody');
             tbody.innerHTML = '';
-
-            const hardcoded = [
-                { pat: '(?i)\\bcp\\b', desc: 'Zero-Tolerance Child Material', action: 'BAN' },
-                { pat: '(?i)m+e+g+a+(l+i+n+k+|...)', desc: 'Megalink Raid Variations', action: 'BAN' },
-                { pat: '(?i)h+o+t+(l+i+n+k+|...)', desc: 'Hotlink Raid Vectors', action: 'BAN' },
-                { pat: '(?i)d+s+m+.*o+p+e+n+', desc: 'DSM Open Spam Payload', action: 'BAN' },
-            ];
-
-            hardcoded.forEach(r => {
-                tbody.innerHTML += `<tr>
-                    <td><span class="badge">HARDCODED</span></td>
-                    <td><code>${r.pat}</code></td>
-                    <td>${r.desc}</td>
-                    <td><span style="color: var(--danger); font-weight: 700;">${r.action}</span></td>
-                    <td><span style="color: var(--success);">ACTIVE (&lt;1μs)</span></td>
-                    <td><span style="color: var(--text-muted);">Core Lock</span></td>
-                </tr>`;
-            });
-
             data.forEach(r => {
-                tbody.innerHTML += `<tr>
-                    <td><span class="badge" style="color: #f39c12;">DYNAMIC</span></td>
-                    <td><code>${r.pattern}</code></td>
-                    <td>${r.description}</td>
-                    <td><b>${r.action.toUpperCase()}</b></td>
-                    <td>${r.enabled ? '🟢 ENABLED' : '⚪ DISABLED'}</td>
-                    <td><button class="btn btn-sm btn-danger" onclick="deleteRule('${r.pattern}')">Delete</button></td>
-                </tr>`;
+                tbody.innerHTML += `
+                    <tr>
+                        <td><code>${escapeHtml(r.pattern)}</code></td>
+                        <td>${escapeHtml(r.description)}</td>
+                        <td><b>${r.action.toUpperCase()}</b></td>
+                        <td>${r.enabled ? '🟢 Active' : '⚪ Inactive'}</td>
+                        <td><button class="btn btn-sm btn-danger" onclick="deleteRule('${encodeURIComponent(r.pattern)}')">Delete</button></td>
+                    </tr>
+                `;
             });
         }
 
-        async function addRegexRule(e) {
+        async function addRule(e) {
             e.preventDefault();
             const pattern = document.getElementById('new-rule-pattern').value;
             const description = document.getElementById('new-rule-desc').value;
             const action = document.getElementById('new-rule-action').value;
-
-            const res = await fetch('/api/rules', {
+            await fetch(`${API}/api/rules`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ pattern, description, action })
             });
-
-            if (res.ok) {
-                document.getElementById('new-rule-pattern').value = '';
-                document.getElementById('new-rule-desc').value = '';
-                loadRules();
-            } else {
-                alert('Invalid regex syntax.');
-            }
+            document.getElementById('new-rule-pattern').value = '';
+            document.getElementById('new-rule-desc').value = '';
+            loadRules();
         }
 
-        async function deleteRule(pattern) {
-            if (confirm('Delete rule: ' + pattern + '?')) {
-                await fetch('/api/rules?pattern=' + encodeURIComponent(pattern), { method: 'DELETE' });
+        async function deleteRule(pat) {
+            if (confirm('Delete rule?')) {
+                await fetch(`${API}/api/rules?pattern=${pat}`, { method: 'DELETE', credentials: 'include' });
                 loadRules();
             }
         }
 
+        // --- WHITELISTS ---
         async function loadWhitelists() {
-            const uRes = await fetch('/api/whitelist/users');
+            const uRes = await fetch(`${API}/api/whitelist/users`, { credentials: 'include' });
             const uData = await uRes.json();
             const uTbody = document.getElementById('wl-users-tbody');
             uTbody.innerHTML = '';
             uData.forEach(u => {
-                uTbody.innerHTML += `<tr>
-                    <td><code>${u.identifier}</code></td>
-                    <td>${u.reason}</td>
-                    <td>${u.added_by}</td>
-                    <td><button class="btn btn-sm btn-danger" onclick="deleteWlUser('${u.identifier}')">Remove</button></td>
-                </tr>`;
+                uTbody.innerHTML += `
+                    <tr>
+                        <td><code>${escapeHtml(u.identifier)}</code></td>
+                        <td>${escapeHtml(u.reason)}</td>
+                        <td>${escapeHtml(u.added_by)}</td>
+                        <td><button class="btn btn-sm btn-danger" onclick="deleteWlUser('${encodeURIComponent(u.identifier)}')">Remove</button></td>
+                    </tr>
+                `;
             });
 
-            const iRes = await fetch('/api/whitelist/images');
-            const iData = await iRes.json();
-            const iTbody = document.getElementById('wl-images-tbody');
-            iTbody.innerHTML = '';
-            iData.forEach(img => {
-                iTbody.innerHTML += `<tr>
-                    <td><b>${img.label}</b></td>
-                    <td><code>${img.sha256.substring(0, 16)}...</code></td>
-                    <td>${img.added_by}</td>
-                    <td><button class="btn btn-sm btn-danger" onclick="deleteWlImage('${img.sha256}')">Remove</button></td>
-                </tr>`;
+            const mRes = await fetch(`${API}/api/whitelist/images`, { credentials: 'include' });
+            const mData = await mRes.json();
+            const mTbody = document.getElementById('wl-media-tbody');
+            mTbody.innerHTML = '';
+            mData.forEach(m => {
+                mTbody.innerHTML += `
+                    <tr>
+                        <td><b>${escapeHtml(m.label)}</b></td>
+                        <td><code>${(m.sha256 || '').substring(0, 16)}...</code></td>
+                        <td><code>${m.dhash ? m.dhash : 'None'}</code></td>
+                        <td>${escapeHtml(m.added_by)}</td>
+                        <td><button class="btn btn-sm btn-danger" onclick="deleteWlMedia('${m.sha256}')">Remove</button></td>
+                    </tr>
+                `;
             });
         }
 
-        async function addWhitelistedUser(e) {
+        async function addWlUser(e) {
             e.preventDefault();
             const identifier = document.getElementById('new-wl-user').value;
             const reason = document.getElementById('new-wl-reason').value;
-
-            const res = await fetch('/api/whitelist/users', {
+            await fetch(`${API}/api/whitelist/users`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ identifier, reason })
             });
-            if (res.ok) {
-                document.getElementById('new-wl-user').value = '';
-                document.getElementById('new-wl-reason').value = '';
+            document.getElementById('new-wl-user').value = '';
+            document.getElementById('new-wl-reason').value = '';
+            loadWhitelists();
+        }
+
+        async function deleteWlUser(id) {
+            if (confirm('Remove user whitelist?')) {
+                await fetch(`${API}/api/whitelist/users?identifier=${id}`, { method: 'DELETE', credentials: 'include' });
                 loadWhitelists();
             }
         }
 
-        async function deleteWlUser(identifier) {
-            if (confirm('Remove: ' + identifier + '?')) {
-                await fetch('/api/whitelist/users?identifier=' + encodeURIComponent(identifier), { method: 'DELETE' });
-                loadWhitelists();
-            }
-        }
-
-        async function addWhitelistedImage(e) {
+        async function addWlMedia(e) {
             e.preventDefault();
-            const url = document.getElementById('new-wl-image-url').value;
-            const label = document.getElementById('new-wl-image-label').value;
-
-            const res = await fetch('/api/whitelist/images', {
+            const url = document.getElementById('new-wl-media-url').value;
+            const label = document.getElementById('new-wl-media-label').value;
+            await fetch(`${API}/api/whitelist/images`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ url, label })
             });
-            if (res.ok) {
-                document.getElementById('new-wl-image-url').value = '';
-                document.getElementById('new-wl-image-label').value = '';
+            document.getElementById('new-wl-media-url').value = '';
+            document.getElementById('new-wl-media-label').value = '';
+            loadWhitelists();
+        }
+
+        async function deleteWlMedia(sha) {
+            if (confirm('Remove media whitelist?')) {
+                await fetch(`${API}/api/whitelist/images?sha256=${sha}`, { method: 'DELETE', credentials: 'include' });
                 loadWhitelists();
             }
         }
 
-        async function deleteWlImage(sha256) {
-            if (confirm('Remove image whitelist?')) {
-                await fetch('/api/whitelist/images?sha256=' + sha256, { method: 'DELETE' });
-                loadWhitelists();
-            }
-        }
-
-        async function oneClickWhitelistUser(username) {
-            const reason = prompt('Reason for whitelisting user:', 'Audit Override');
-            if (reason) {
-                await fetch('/api/whitelist/users', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ identifier: username, reason })
-                });
-                alert('User @' + username + ' whitelisted!');
-                loadWhitelists();
-            }
-        }
-
-        async function loadImages() {
-            const res = await fetch('/api/images');
+        // --- BLACKLISTED MEDIA ---
+        async function loadBlacklist() {
+            const res = await fetch(`${API}/api/images`, { credentials: 'include' });
             const data = await res.json();
-            const tbody = document.getElementById('images-tbody');
+            const tbody = document.getElementById('blacklist-tbody');
             tbody.innerHTML = '';
             data.forEach(img => {
-                tbody.innerHTML += `<tr>
-                    <td><b>${img.label || 'Blacklisted Media'}</b></td>
-                    <td><code>${img.sha256.substring(0, 16)}...</code></td>
-                    <td><code>${img.dhash ? img.dhash : 'Exact SHA only'}</code></td>
-                    <td>${img.added_by || 'Auto-Detected'}</td>
-                    <td><button class="btn btn-sm btn-danger" onclick="revokeImage('${img.sha256}')">Revoke</button></td>
-                </tr>`;
+                tbody.innerHTML += `
+                    <tr>
+                        <td><b>${escapeHtml(img.label || 'Blacklisted Signature')}</b></td>
+                        <td><code>${(img.sha256 || '').substring(0, 16)}...</code></td>
+                        <td><code>${img.dhash || 'None'}</code></td>
+                        <td>${escapeHtml(img.added_by || 'Auto-Detected')}</td>
+                        <td><button class="btn btn-sm btn-danger" onclick="deleteBlacklist('${img.sha256}')">Revoke</button></td>
+                    </tr>
+                `;
             });
         }
 
-        async function blacklistImage(e) {
+        async function addBlacklistMedia(e) {
             e.preventDefault();
-            const url = document.getElementById('new-image-url').value;
-            const label = document.getElementById('new-image-label').value;
-
-            const res = await fetch('/api/images/blacklist', {
+            const url = document.getElementById('new-bl-media-url').value;
+            const label = document.getElementById('new-bl-media-label').value;
+            await fetch(`${API}/api/images/blacklist`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ url, label })
             });
-            if (res.ok) {
-                document.getElementById('new-image-url').value = '';
-                document.getElementById('new-image-label').value = '';
-                loadImages();
-            }
+            document.getElementById('new-bl-media-url').value = '';
+            document.getElementById('new-bl-media-label').value = '';
+            loadBlacklist();
         }
 
-        async function revokeImage(sha256) {
+        async function deleteBlacklist(sha) {
             if (confirm('Revoke blacklist signature?')) {
-                await fetch('/api/images?sha256=' + sha256, { method: 'DELETE' });
-                loadImages();
+                await fetch(`${API}/api/images?sha256=${sha}`, { method: 'DELETE', credentials: 'include' });
+                loadBlacklist();
             }
         }
 
+        // --- WASM PLUGINS ---
         async function loadPlugins() {
-            const res = await fetch('/api/plugins/list');
+            const res = await fetch(`${API}/api/plugins/list`, { credentials: 'include' });
             const data = await res.json();
             const tbody = document.getElementById('plugins-tbody');
             tbody.innerHTML = '';
             data.forEach(p => {
                 const cmds = (p.manifest.slash_commands || []).map(c => `/${c.name}`).join(', ') || 'None';
-                const routes = (p.manifest.http_routes || []).join(', ') || 'None';
-                tbody.innerHTML += `<tr>
-                    <td><b>${p.name}</b></td>
-                    <td><code>${cmds}</code></td>
-                    <td><code>${routes}</code></td>
-                    <td>${(p.bytecode_len / 1024).toFixed(1)} KB</td>
-                    <td>
-                        <button class="btn btn-sm ${p.enabled ? 'btn-success' : 'btn-danger'}" onclick="togglePlugin('${p.name}', ${!p.enabled})">
-                            ${p.enabled ? '🟢 ENABLED' : '⚪ DISABLED'}
-                        </button>
-                    </td>
-                    <td><button class="btn btn-sm btn-danger" onclick="deletePlugin('${p.name}')">Delete</button></td>
-                </tr>`;
+                tbody.innerHTML += `
+                    <tr>
+                        <td><b>${escapeHtml(p.name)}</b></td>
+                        <td><code>${cmds}</code></td>
+                        <td>${(p.bytecode_len / 1024).toFixed(1)} KB</td>
+                        <td>
+                            <button class="btn btn-sm ${p.enabled ? 'btn-success' : 'btn-danger'}" onclick="togglePlugin('${p.name}', ${!p.enabled})">
+                                ${p.enabled ? '🟢 ENABLED' : '⚪ DISABLED'}
+                            </button>
+                        </td>
+                        <td><button class="btn btn-sm btn-danger" onclick="deletePlugin('${p.name}')">Delete</button></td>
+                    </tr>
+                `;
             });
+        }
+
+        async function togglePlugin(name, enabled) {
+            await fetch(`${API}/api/plugins/toggle`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ name, enabled })
+            });
+            loadPlugins();
+        }
+
+        async function deletePlugin(name) {
+            if (confirm(`Permanently delete plugin '${name}'?`)) {
+                await fetch(`${API}/api/plugins/delete?name=${encodeURIComponent(name)}`, { method: 'DELETE', credentials: 'include' });
+                loadPlugins();
+            }
         }
 
         async function uploadPlugin(e) {
             e.preventDefault();
             const name = document.getElementById('new-plugin-name').value;
             const wasm_base64 = document.getElementById('new-plugin-wasm').value;
-
-            const res = await fetch('/api/plugins/upload', {
+            const res = await fetch(`${API}/api/plugins/upload`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ name, wasm_base64 })
             });
             if (res.ok) {
@@ -542,69 +662,37 @@
             }
         }
 
-        async function togglePlugin(name, enabled) {
-            await fetch('/api/plugins/toggle', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, enabled })
-            });
-            loadPlugins();
-        }
-
-        async function deletePlugin(name) {
-            if (confirm('Delete plugin ' + name + '?')) {
-                await fetch('/api/plugins/delete?name=' + encodeURIComponent(name), { method: 'DELETE' });
-                loadPlugins();
-            }
-        }
-
-        async function loadAudits() {
-            const res = await fetch('/api/audits');
-            const data = await res.json();
-            const tbody = document.getElementById('audits-tbody');
-            tbody.innerHTML = '';
-            data.forEach(a => {
-                tbody.innerHTML += `<tr>
-                    <td>${new Date(a.timestamp.$date).toLocaleTimeString()}</td>
-                    <td><code>${a.user_id}</code></td>
-                    <td>${a.username}</td>
-                    <td>${a.reason}</td>
-                    <td><b>${(a.confidence * 100).toFixed(1)}%</b></td>
-                    <td><button class="btn btn-sm btn-success" onclick="oneClickWhitelistUser('${a.username.replace(/<@|>/g, '')}')">✓ Whitelist</button></td>
-                </tr>`;
-            });
-        }
-
-        async function loadUsers() {
-            const res = await fetch('/api/users');
+        // --- OPERATORS ---
+        async function loadOperators() {
+            const res = await fetch(`${API}/api/users`, { credentials: 'include' });
             if (!res.ok) return;
             const data = await res.json();
-            const tbody = document.getElementById('users-tbody');
+            const tbody = document.getElementById('operators-tbody');
             tbody.innerHTML = '';
             data.forEach(u => {
-                tbody.innerHTML += `<tr>
-                    <td><b>${u.username}</b></td>
-                    <td><span class="badge">${u.role.toUpperCase()}</span></td>
-                    <td>${new Date(u.created_at.$date).toLocaleDateString()}</td>
-                </tr>`;
+                tbody.innerHTML += `
+                    <tr>
+                        <td><b>${escapeHtml(u.username)}</b></td>
+                        <td><code>${u.role.toUpperCase()}</code></td>
+                        <td>${formatTimestamp(u.created_at)}</td>
+                    </tr>
+                `;
             });
         }
 
-        async function createModerator(e) {
+        async function createOperator(e) {
             e.preventDefault();
-            const username = document.getElementById('new-mod-username').value;
-            const password = document.getElementById('new-mod-password').value;
-
-            const res = await fetch('/api/users', {
+            const username = document.getElementById('new-op-user').value;
+            const password = document.getElementById('new-op-pass').value;
+            await fetch(`${API}/api/users`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ username, password })
             });
-            if (res.ok) {
-                document.getElementById('new-mod-username').value = '';
-                document.getElementById('new-mod-password').value = '';
-                loadUsers();
-            }
+            document.getElementById('new-op-user').value = '';
+            document.getElementById('new-op-pass').value = '';
+            loadOperators();
         }
 
         init();

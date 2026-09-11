@@ -34,6 +34,8 @@ pub struct WhitelistedUser {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WhitelistedImage {
     pub sha256: String,
+    #[serde(default)]
+    pub dhash: u64,
     pub label: String,
     pub added_by: String,
     pub created_at: BsonDateTime,
@@ -233,20 +235,29 @@ impl DatabaseEngine {
         Ok(users)
     }
 
+    /// Atomically records a whitelisted image and evicts any existing blacklist signatures
     pub async fn add_whitelisted_image(
         &self,
         sha256: &str,
+        dhash: u64,
         label: &str,
         added_by: &str,
     ) -> Result<()> {
         let sig_coll: Collection<Document> = self.db.collection("image_signatures");
-        sig_coll.delete_many(doc! { "sha256": sha256 }).await?;
+
+        // Evict exact SHA-256 and matching dHash from blacklist
+        let mut filter = vec![doc! { "sha256": sha256 }];
+        if dhash != 0 {
+            filter.push(doc! { "dhash": dhash as i64 });
+        }
+        sig_coll.delete_many(doc! { "$or": filter }).await?;
 
         let wl_coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
         wl_coll.delete_many(doc! { "sha256": sha256 }).await?;
         wl_coll
             .insert_one(WhitelistedImage {
                 sha256: sha256.to_string(),
+                dhash,
                 label: label.to_string(),
                 added_by: added_by.to_string(),
                 created_at: BsonDateTime::now(),

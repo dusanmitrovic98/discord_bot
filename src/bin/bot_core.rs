@@ -37,7 +37,7 @@ async fn main() {
     .expect("Fatal: BotContainer bootstrap failed");
 
     // =========================================================================
-    // BACKGROUND DYNAMIC SYNCHRONIZER (Throttled to 30s to spare MongoDB Atlas)
+    // BACKGROUND DYNAMIC SYNCHRONIZER (Throttled to 30s, Full Toggle Parity)
     // =========================================================================
     let sync_c = container.clone();
     tokio::spawn(async move {
@@ -59,12 +59,17 @@ async fn main() {
                 *guard = dhashes;
             }
 
-            // 4. Sync WASM Community Plugins dynamically into RAM!
+            // 4. Sync WASM Community Plugins with Full Toggle Parity!
             if let Ok(records) = sync_c.db.fetch_all_plugin_records().await {
-                for p in records.into_iter().filter(|r| r.enabled) {
-                    let _ = sync_c
-                        .plugin_engine
-                        .hot_swap_plugin(&p.name, &p.bytecode.bytes);
+                for p in records {
+                    if p.enabled {
+                        let _ = sync_c
+                            .plugin_engine
+                            .hot_swap_plugin(&p.name, &p.bytecode.bytes);
+                    } else {
+                        // Evict disabled plugins from RAM registry!
+                        sync_c.plugin_engine.unload_plugin(&p.name);
+                    }
                 }
             }
         }

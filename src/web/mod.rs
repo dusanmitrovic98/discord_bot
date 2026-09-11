@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod routes;
 
+use crate::telemetry::LogBuffer;
 use axum::routing::{any, delete, get, post};
 use axum::Router;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ pub struct AppState {
     pub db: Arc<DatabaseEngine>,
     pub reload_notifier: Arc<Notify>,
     pub session_secret: [u8; 32],
+    pub log_buffer: LogBuffer,
 }
 
 pub fn build_web_router(state: AppState) -> Router {
