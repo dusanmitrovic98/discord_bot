@@ -1,3 +1,8 @@
+//! # Database Engine & MongoDB Atlas Storage Layer
+//!
+//! Manages persistence for system blobs, dynamic regexes, dual-layer whitelists,
+//! perceptual blacklists, audit logs, and sandboxed WASM plugin storage.
+
 use crate::{AegisError, Result};
 use mongodb::{
     bson::{doc, Binary, DateTime as BsonDateTime, Document},
@@ -119,9 +124,6 @@ impl DatabaseEngine {
             })
     }
 
-    // =========================================================================
-    // IN-MEMORY dHash MIRROR DATA PROVIDER (Zero remote cursor scans!)
-    // =========================================================================
     pub async fn fetch_all_dhashes(&self) -> Result<Vec<u64>> {
         let coll: Collection<Document> = self.db.collection("image_signatures");
         let mut cursor = coll.find(doc! {}).await?;
@@ -235,7 +237,7 @@ impl DatabaseEngine {
         Ok(users)
     }
 
-    /// Atomically records a whitelisted image and evicts any existing blacklist signatures
+    /// Atomically records a whitelisted image and evicts exact SHA & dHash from blacklist
     pub async fn add_whitelisted_image(
         &self,
         sha256: &str,
@@ -244,8 +246,6 @@ impl DatabaseEngine {
         added_by: &str,
     ) -> Result<()> {
         let sig_coll: Collection<Document> = self.db.collection("image_signatures");
-
-        // Evict exact SHA-256 and matching dHash from blacklist
         let mut filter = vec![doc! { "sha256": sha256 }];
         if dhash != 0 {
             filter.push(doc! { "dhash": dhash as i64 });
@@ -354,24 +354,7 @@ impl DatabaseEngine {
         Ok(audits)
     }
 
-    pub async fn fetch_active_plugins(&self) -> Result<Vec<(String, Vec<u8>)>> {
-        let coll: Collection<Document> = self.db.collection("plugins");
-        let mut cursor = coll.find(doc! { "enabled": true }).await?;
-        let mut plugins = Vec::new();
-
-        while cursor.advance().await? {
-            let doc = cursor.deserialize_current()?;
-            if let (Ok(name), Ok(bytes)) = (doc.get_str("name"), doc.get_binary_generic("bytecode"))
-            {
-                plugins.push((name.to_string(), bytes.to_vec()));
-            }
-        }
-        Ok(plugins)
-    }
-
-    // =========================================================================
-    // COMMUNITY WASM PLUGINS REGISTRY
-    // =========================================================================
+    // WASM Plugins
     pub async fn save_plugin_record(&self, record: PluginRecord) -> Result<()> {
         let coll: Collection<PluginRecord> = self.db.collection("plugins");
         coll.delete_many(doc! { "name": &record.name }).await?;
@@ -405,9 +388,6 @@ impl DatabaseEngine {
         Ok(())
     }
 
-    // =========================================================================
-    // ISOLATED PLUGIN KEY-VALUE STORAGE
-    // =========================================================================
     pub async fn plugin_kv_set(&self, plugin_id: &str, key: &str, value: &str) -> Result<()> {
         let coll: Collection<PluginKvEntry> = self.db.collection("plugin_storage");
         coll.delete_many(doc! { "plugin_id": plugin_id, "key": key })

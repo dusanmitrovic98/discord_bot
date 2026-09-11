@@ -1,3 +1,9 @@
+//! # Dual-Layer Whitelist Registry
+//!
+//! Maintains in-memory thread-safe registries of whitelisted usernames, user IDs,
+//! exact SHA-256 image hashes, and 64-bit perceptual difference hashes (dHash).
+//! Complies with NASA Rule 2 & Rule 5 (bounded memory, fail-safe defaults).
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,7 +34,7 @@ impl WhitelistRegistry {
         }
     }
 
-    /// Synchronizes user identifiers, image SHAs, and perceptual dHashes into RAM
+    /// Synchronizes user identifiers, image SHAs, and perceptual dHashes from MongoDB into RAM
     pub async fn sync_from_db(&self, db: &DatabaseEngine) -> Result<()> {
         let mut user_set = HashSet::new();
         if let Ok(users) = db.fetch_whitelisted_users().await {
@@ -105,7 +111,7 @@ impl WhitelistRegistry {
             return true;
         }
 
-        // Perceptual invariance: allows Discord re-compression / minor proxy artifacts (NASA Rule 5)
+        // Perceptual invariance: allows Discord re-compression & minor proxy artifacts (NASA Rule 5)
         if dhash != 0 {
             let d_guard = self.dhashes.read().await;
             for &safe_dhash in d_guard.iter() {
@@ -146,7 +152,6 @@ mod tests {
         let registry = WhitelistRegistry::new();
         let sample_hash = "907cbc96639a65097b5dad76b89b36598f5139d7108323ed3a333f72b9a922da";
 
-        // Test pure SHA-256 whitelist with 0 as dhash
         registry.add_image(sample_hash, 0).await;
         assert!(registry.is_image_safe(sample_hash, 0).await);
         assert!(registry.is_image_safe(&sample_hash.to_uppercase(), 0).await);
@@ -164,7 +169,7 @@ mod tests {
         // 1. Exact SHA-256 match
         assert!(registry.is_image_safe(exact_sha, 0).await);
 
-        // 2. Different SHA, but identical dHash (resaved/re-encoded image)
+        // 2. Different SHA, but identical dHash (re-encoded image)
         assert!(
             registry
                 .is_image_safe("different_sha_from_proxy", base_dhash)

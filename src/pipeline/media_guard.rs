@@ -1,3 +1,11 @@
+//! # Media Guard Triage Pipeline
+//!
+//! Evaluates incoming attachments, embeds, and avatars through the multi-tier defense:
+//! Tier 1: In-Memory Whitelist (Fast-path SHA & Perceptual dHash <= 2)
+//! Tier 2: SHA-256 Exact Blacklist
+//! Tier 3: In-Memory dHash Logo & Raiding Blacklist (Distance <= 6)
+//! Tier 4: Bounded ViT AI Inference Queue
+
 use tracing::{info, warn};
 
 use crate::bot::BotContainer;
@@ -11,6 +19,7 @@ pub enum MediaVerdict {
     QueuedForInference(tokio::sync::oneshot::Receiver<Result<crate::queue::ClassifierResponse>>),
 }
 
+/// Evaluates media payload through In-Memory Whitelist -> In-Memory dHash/SHA -> AI Queue (NASA Rule 4)
 pub async fn triage_media(
     c: &BotContainer,
     payload: &MediaPayload,
@@ -18,7 +27,7 @@ pub async fn triage_media(
     guild_id: u64,
     media_url: String,
 ) -> Result<MediaVerdict> {
-    // 1. In-Memory Whitelist Check (Fast-path SHA & Perceptual dHash <= 2)
+    // 1. In-Memory Whitelist Check (Fast-path SHA & Perceptual dHash <= 2 bypasses all scans)
     if c.whitelist
         .is_image_safe(&payload.sha256, payload.dhash)
         .await

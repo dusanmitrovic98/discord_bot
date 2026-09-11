@@ -1,3 +1,9 @@
+//! # Sebastian The Butler - Active Bot Core Binary
+//!
+//! Hot-swappable child core binary running inside sealed Linux RAM (`memfd_create`).
+//! Connects to the Discord Gateway, hosts the background dynamic synchronizer,
+//! and runs the multimodal defense and WASM plugin engine.
+
 use serenity::prelude::*;
 use std::env;
 use std::sync::Arc;
@@ -17,7 +23,7 @@ async fn main() {
         )
         .init();
 
-    info!("Initializing Aegis Bastion Bot Core (Full Overhaul)...");
+    info!("Initializing Sebastian The Butler Core...");
 
     let token = env::var("DISCORD_TOKEN").expect("Fatal: DISCORD_TOKEN required");
     let mongo_uri =
@@ -37,7 +43,7 @@ async fn main() {
     .expect("Fatal: BotContainer bootstrap failed");
 
     // =========================================================================
-    // BACKGROUND DYNAMIC SYNCHRONIZER (Throttled to 30s, Full Toggle Parity)
+    // BACKGROUND DYNAMIC SYNCHRONIZER (Throttled to 30s to spare MongoDB Atlas)
     // =========================================================================
     let sync_c = container.clone();
     tokio::spawn(async move {
@@ -67,7 +73,7 @@ async fn main() {
                             .plugin_engine
                             .hot_swap_plugin(&p.name, &p.bytecode.bytes);
                     } else {
-                        // Evict disabled plugins from RAM registry!
+                        // Evict disabled plugins from RAM registry immediately
                         sync_c.plugin_engine.unload_plugin(&p.name);
                     }
                 }
@@ -78,7 +84,10 @@ async fn main() {
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS
         | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::GUILD_MESSAGE_REACTIONS
+        | GatewayIntents::GUILD_VOICE_STATES
         | GatewayIntents::MESSAGE_CONTENT;
+
     let mut client = Client::builder(&token, intents)
         .event_handler(Handler)
         .await

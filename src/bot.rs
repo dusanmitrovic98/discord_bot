@@ -1,3 +1,8 @@
+//! # Sebastian The Butler - Discord Bot Gateway Core
+//!
+//! Event handler coordinating text gatekeeping, perceptual media defense,
+//! dynamic slash commands, and WASM microkernel gateway event multiplexing.
+
 use serenity::async_trait;
 use serenity::builder::{
     CreateCommand, CreateCommandOption, CreateInteractionResponse,
@@ -6,14 +11,16 @@ use serenity::builder::{
 use serenity::model::application::{
     CommandDataOptionValue, CommandInteraction, CommandOptionType, Interaction,
 };
-use serenity::model::channel::Message;
+use serenity::model::channel::{Message, Reaction};
 use serenity::model::gateway::Ready;
 use serenity::model::guild::{Guild, Member};
 use serenity::model::id::{GuildId, UserId};
+use serenity::model::user::User;
+use serenity::model::voice::VoiceState;
 use serenity::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::GuildConfig;
 use crate::db::{AuditLogEntry, DatabaseEngine};
@@ -138,7 +145,6 @@ impl EventHandler for Handler {
             CreateCommand::new("db-stats").description("Audit MongoDB cloud storage usage"),
         ];
 
-        // Dynamically register slash commands declared by installed WASM plugins!
         for manifest in c.plugin_engine.get_all_manifests() {
             for def in manifest.slash_commands {
                 info!("🧩 Registering plugin slash command: /{}", def.name);
@@ -167,6 +173,18 @@ impl EventHandler for Handler {
         }
 
         let user_id = member.user.id.get();
+
+        // Gateway event forwarder
+        dispatch_plugin_event(
+            &c,
+            "member_join",
+            serde_json::json!({
+                "guild_id": member.guild_id.get(),
+                "user_id": user_id,
+                "username": &member.user.name
+            }),
+        );
+
         let eval = evaluate_member_names(
             &c.gatekeeper,
             &c.whitelist,
@@ -218,6 +236,69 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn guild_member_removal(
+        &self,
+        ctx: Context,
+        guild_id: GuildId,
+        user: User,
+        _member_data: Option<Member>,
+    ) {
+        let c = get_container(&ctx).await;
+        dispatch_plugin_event(
+            &c,
+            "member_leave",
+            serde_json::json!({
+                "guild_id": guild_id.get(),
+                "user_id": user.id.get(),
+                "username": &user.name
+            }),
+        );
+    }
+
+    async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+        let c = get_container(&ctx).await;
+        dispatch_plugin_event(
+            &c,
+            "voice_state_update",
+            serde_json::json!({
+                "user_id": new.user_id.get(),
+                "guild_id": new.guild_id.map(|g| g.get()),
+                "channel_id": new.channel_id.map(|c| c.get()),
+                "old_channel_id": old.and_then(|o| o.channel_id.map(|c| c.get())),
+                "self_mute": new.self_mute,
+                "self_deaf": new.self_deaf
+            }),
+        );
+    }
+
+    async fn reaction_add(&self, ctx: Context, reaction: Reaction) {
+        let c = get_container(&ctx).await;
+        dispatch_plugin_event(
+            &c,
+            "reaction_add",
+            serde_json::json!({
+                "user_id": reaction.user_id.map(|u| u.get()),
+                "channel_id": reaction.channel_id.get(),
+                "message_id": reaction.message_id.get(),
+                "emoji": reaction.emoji.as_data()
+            }),
+        );
+    }
+
+    async fn reaction_remove(&self, ctx: Context, reaction: Reaction) {
+        let c = get_container(&ctx).await;
+        dispatch_plugin_event(
+            &c,
+            "reaction_remove",
+            serde_json::json!({
+                "user_id": reaction.user_id.map(|u| u.get()),
+                "channel_id": reaction.channel_id.get(),
+                "message_id": reaction.message_id.get(),
+                "emoji": reaction.emoji.as_data()
+            }),
+        );
+    }
+
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.id == ctx.cache.current_user().id {
             return;
@@ -226,6 +307,20 @@ impl EventHandler for Handler {
         if msg.guild_id != Some(GuildId::new(c.config.authorized_guild_id)) {
             return;
         }
+
+        // Asynchronously broadcast to subscribed WASM plugins
+        dispatch_plugin_event(
+            &c,
+            "message_create",
+            serde_json::json!({
+                "id": msg.id.get(),
+                "channel_id": msg.channel_id.get(),
+                "author_id": msg.author.id.get(),
+                "author_name": &msg.author.name,
+                "content": &msg.content,
+                "is_bot": msg.author.bot
+            }),
+        );
 
         if guard_author_names(&ctx, &c, &msg).await {
             return;
@@ -245,6 +340,14 @@ impl EventHandler for Handler {
 }
 
 // Subroutines (<40 lines each, NASA Rule 1 & 4)
+
+fn dispatch_plugin_event(c: &BotContainer, event_name: &str, data: serde_json::Value) {
+    if c.plugin_engine.has_subscribers_for(event_name) {
+        c.plugin_engine
+            .dispatch_event(event_name, &data.to_string());
+    }
+}
+
 async fn get_container(ctx: &Context) -> Arc<BotContainer> {
     ctx.data
         .read()
@@ -316,7 +419,6 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
 async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> bool {
     if let Some(avatar_url) = msg.author.avatar_url() {
         if let Ok(payload) = c.media_inspector.inspect_url(&avatar_url).await {
-            // Check dual-layer whitelist (SHA + dHash)
             if !c
                 .whitelist
                 .is_image_safe(&payload.sha256, payload.dhash)
@@ -531,7 +633,6 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
     }
 }
 
-// Slash commands router
 async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInteraction) {
     let caller_id = cmd.user.id.get();
     let roles: Vec<u64> = cmd
@@ -560,7 +661,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
         "whitelist-pfp" => cmd_whitelist_pfp(ctx, c, &cmd).await,
         "db-stats" => cmd_db_stats(ctx, c, &cmd).await,
         plugin_cmd => {
-            // Dynamic Community Plugin Dispatcher with Telemetry
             let mut handled = false;
             for manifest in c.plugin_engine.get_all_manifests() {
                 if manifest.slash_commands.iter().any(|s| s.name == plugin_cmd) {
@@ -569,7 +669,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                         "🧩 [PLUGIN] Executing /{} from plugin '{}' for user {}",
                         plugin_cmd, manifest.name, caller_id
                     );
-
                     let opts_json = serde_json::to_string(&cmd.data.options).unwrap_or_default();
                     match c.plugin_engine.execute_slash_command(
                         &manifest.name,
@@ -577,7 +676,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                         &opts_json,
                     ) {
                         Ok(reply) => {
-                            info!("🎲 [PLUGIN RESULT] /{} output: {}", plugin_cmd, reply);
+                            info!("🎲 [PLUGIN RESULT] /{} output: '{}'", plugin_cmd, reply);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -588,7 +687,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                                 .await;
                         }
                         Err(e) => {
-                            error!("❌ [PLUGIN ERROR] /{} trapped: {}", plugin_cmd, e);
+                            tracing::error!("❌ [PLUGIN ERROR] /{} trapped: {}", plugin_cmd, e);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -605,7 +704,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                 }
             }
             if !handled {
-                warn!("⚠️ [PLUGIN] Unhandled slash command: /{}", plugin_cmd);
                 let _ = cmd
                     .create_response(
                         &ctx.http,
@@ -724,12 +822,14 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
                 "🧪 **Avatar ViT Classifier Test**\n\
                 > **URL:** {}\n\
                 > **SHA-256:** `{}`\n\
+                > **dHash:** `{:016x}`\n\
                 > **Cache:** Whitelisted: `{}` | Blacklisted: `{}`\n\
                 > **Verdict:** {}\n\
                 > **Confidence:** Safe: `{:.1}%` | NSFW: `{:.1}%`\n\
                 > **Inference Latency:** `{}`",
                 url,
                 payload.sha256,
+                payload.dhash,
                 is_whitelisted,
                 is_blacklisted,
                 verdict_str,
@@ -848,14 +948,13 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
                 .await;
         c.whitelist.add_image(&payload.sha256, payload.dhash).await;
 
-        // Evict from RAM blacklisted dHashes mirror immediately
         if payload.dhash != 0 {
             let mut guard = c.blacklisted_dhashes.write().await;
             guard.retain(|&banned| (banned ^ payload.dhash).count_ones() > 6);
         }
 
         let reply = format!(
-            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n*This image and its resized variants will permanently bypass all filters.*",
+            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n*This image and its resized variants permanently bypass all filters.*",
             target_id, payload.sha256, payload.dhash
         );
         let _ = cmd
