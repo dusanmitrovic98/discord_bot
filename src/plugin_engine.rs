@@ -71,7 +71,7 @@ impl Default for DynamicPluginEngine {
 impl DynamicPluginEngine {
     pub fn new() -> Self {
         let mut config = Config::new();
-        config.consume_fuel(true); // NASA Rule 2: Strict execution bounding
+        config.consume_fuel(true);
         let engine = Engine::new(&config).expect("Wasmtime engine initialization failed");
 
         Self {
@@ -86,7 +86,19 @@ impl DynamicPluginEngine {
         self
     }
 
-    /// Pre-populates host functions (entropy, capabilities) exposed to guest sandboxes
+    /// Fast-path comparison: returns true if the plugin is already loaded with identical bytecode
+    pub fn is_bytecode_identical(&self, name: &str, new_bytes: &[u8]) -> bool {
+        let guard = match self.registry.read() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if let Some(existing) = guard.get(name) {
+            existing.wasm_bytes == new_bytes
+        } else {
+            false
+        }
+    }
+
     fn build_linker(&self) -> Result<Linker<()>> {
         let mut linker = Linker::new(&self.engine);
         linker
@@ -99,7 +111,6 @@ impl DynamicPluginEngine {
         Ok(linker)
     }
 
-    /// Loads or hot-swaps a WASM plugin bytecode module in memory atomically
     pub fn hot_swap_plugin(&self, name: &str, wasm_bytes: &[u8]) -> Result<PluginManifest> {
         let module = Module::new(&self.engine, wasm_bytes)
             .map_err(|e| AegisError::PluginError(format!("WASM compilation failed: {}", e)))?;
@@ -131,8 +142,9 @@ impl DynamicPluginEngine {
 
     pub fn unload_plugin(&self, name: &str) {
         if let Ok(mut write_guard) = self.registry.write() {
-            write_guard.remove(name);
-            info!("WASM Plugin '{}' unloaded from memory.", name);
+            if write_guard.remove(name).is_some() {
+                info!("WASM Plugin '{}' unloaded from memory.", name);
+            }
         }
     }
 
@@ -149,7 +161,6 @@ impl DynamicPluginEngine {
         }
     }
 
-    /// Fast-path check: returns true if any active plugin listens to this event (NASA Rule 2)
     pub fn has_subscribers_for(&self, event_name: &str) -> bool {
         let guard = match self.registry.read() {
             Ok(g) => g,
@@ -163,7 +174,6 @@ impl DynamicPluginEngine {
         })
     }
 
-    /// Asynchronously broadcasts an event payload to all subscribed plugins in detached Tokio tasks
     pub fn dispatch_event(&self, event_name: &str, payload_json: &str) {
         let plugins: Vec<(String, Module, Vec<String>)> = match self.registry.read() {
             Ok(guard) => guard
@@ -465,8 +475,8 @@ mod tests {
                 )
                 (func (export "on_slash_command") (param i32 i32) (result i64)
                     (if (result i64) (i32.eq (i32.and (call $host_random_u32) (i32.const 1)) (i32.const 0))
-                        (then i64.const 429496729605)  ;; (100 << 32) | 5 -> HEADS
-                        (else i64.const 858993459205)  ;; (200 << 32) | 5 -> TAILS
+                        (then i64.const 429496729605)
+                        (else i64.const 858993459205)
                     )
                 )
             )

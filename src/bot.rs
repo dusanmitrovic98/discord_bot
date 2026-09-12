@@ -125,6 +125,8 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(CommandOptionType::Attachment, "image", "Image file")
                         .required(false),
                 ),
+            CreateCommand::new("test-dms")
+                .description("Owner only: Send all sample notification templates to your DM"),
             CreateCommand::new("whitelist-user")
                 .description("Exempt a user from soft rules")
                 .add_option(
@@ -188,7 +190,6 @@ impl EventHandler for Handler {
             Err(e) => error!("Failed registering slash commands: {}", e),
         }
 
-        // Post boot notification directly to #terminal (1492187958206533834)
         let terminal_channel = ChannelId::new(c.config.terminal_channel_id);
         if let Err(e) = terminal_channel
             .send_message(
@@ -711,6 +712,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
     match cmd.data.name.as_str() {
         "test-name" => cmd_test_name(ctx, c, &cmd).await,
         "test-pfp" => cmd_test_pfp(ctx, c, &cmd).await,
+        "test-dms" => cmd_test_dms(ctx, c, &cmd).await,
         "whitelist-user" => cmd_whitelist_user(ctx, c, &cmd).await,
         "whitelist-pfp" => cmd_whitelist_pfp(ctx, c, &cmd).await,
         "whitelist-image" => cmd_whitelist_image(ctx, c, &cmd).await,
@@ -772,6 +774,81 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
             }
         }
     }
+}
+
+/// Dispatches all 5 notification templates directly to the Sovereign Owner's private messages
+async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let caller_id = cmd.user.id.get();
+    if !c.config.is_owner(caller_id) {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Owner role required.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let _ = cmd.defer_ephemeral(&ctx.http).await;
+    let owner_id = c.config.owner_user_id;
+
+    // Template 1: PFP Under Review
+    send_user_notification(
+        &ctx.http,
+        owner_id,
+        "[Template 1/5] Notice Regarding Your Profile Picture",
+        "Your message was held because your profile picture is currently being reviewed by server safety filters.",
+    ).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Template 2: PFP Verified Safe
+    send_user_notification(
+        &ctx.http,
+        owner_id,
+        "[Template 2/5] Profile Picture Verified Safe",
+        "Your profile picture has been reviewed by server staff and marked safe. Your permissions are fully restored!",
+    ).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Template 3: Manual Staff Notice
+    send_user_notification(
+        &ctx.http,
+        owner_id,
+        "[Template 3/5] Notice from Server Staff",
+        "This is an official communication from server staff regarding community safety.",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Template 4: Attachment Under Review
+    send_user_notification(
+        &ctx.http,
+        owner_id,
+        "[Template 4/5] Notice Regarding Your Message",
+        "Your message was held because an uploaded image or asset is currently being reviewed by server safety filters.",
+    ).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Template 5: Owner Diagnostic Proof
+    send_owner_diagnostic(
+        &ctx.http,
+        &c.config,
+        "[Template 5/5] Sample Diagnostic Proof",
+        "Target: <@1015600709724557434>\nSHA-256: 407d63b271139ac80b1556eac007c167bdf60f36e02613f9893043ccf531d12d\ndHash: 8c4baba3c793c3e3\nStatus: Verified Safe\nLatency: 34ms",
+    ).await;
+
+    let _ = cmd
+        .edit_response(
+            &ctx.http,
+            EditInteractionResponse::new().content(
+                "All 5 sample notification templates have been sent to your private messages.",
+            ),
+        )
+        .await;
 }
 
 async fn cmd_test_name(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {

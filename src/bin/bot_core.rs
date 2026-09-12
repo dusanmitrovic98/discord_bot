@@ -1,8 +1,4 @@
 //! # Sebastian The Butler - Active Bot Core Binary
-//!
-//! Hot-swappable child core binary running inside sealed Linux RAM (`memfd_create`).
-//! Connects to the Discord Gateway, hosts the background dynamic synchronizer,
-//! and runs the multimodal defense and WASM plugin engine.
 
 use serenity::prelude::*;
 use std::env;
@@ -43,7 +39,7 @@ async fn main() {
     .expect("Fatal: BotContainer bootstrap failed");
 
     // =========================================================================
-    // BACKGROUND DYNAMIC SYNCHRONIZER (Throttled to 30s to spare MongoDB Atlas)
+    // BACKGROUND DYNAMIC SYNCHRONIZER (Change-detection enabled: ZERO spam!)
     // =========================================================================
     let sync_c = container.clone();
     tokio::spawn(async move {
@@ -56,7 +52,7 @@ async fn main() {
                 let _ = sync_c.gatekeeper.reload_dynamic_patterns(&patterns);
             }
 
-            // 2. Sync Whitelist (Silent in stdout)
+            // 2. Sync Whitelist (Silent)
             let _ = sync_c.whitelist.sync_from_db(&sync_c.db).await;
 
             // 3. Sync Blacklisted dHashes
@@ -65,16 +61,35 @@ async fn main() {
                 *guard = dhashes;
             }
 
-            // 4. Sync WASM Community Plugins with Full Toggle Parity!
+            // 4. Sync WASM Plugins with Change-Detection (Zero redundant reloads!)
             if let Ok(records) = sync_c.db.fetch_all_plugin_records().await {
+                let active_names: Vec<String> = records
+                    .iter()
+                    .filter(|r| r.enabled)
+                    .map(|r| r.name.clone())
+                    .collect();
+
                 for p in records {
                     if p.enabled {
-                        let _ = sync_c
+                        // Only hot-swap if bytecode has ACTUALLY changed!
+                        if !sync_c
                             .plugin_engine
-                            .hot_swap_plugin(&p.name, &p.bytecode.bytes);
+                            .is_bytecode_identical(&p.name, &p.bytecode.bytes)
+                        {
+                            let _ = sync_c
+                                .plugin_engine
+                                .hot_swap_plugin(&p.name, &p.bytecode.bytes);
+                        }
                     } else {
-                        // Evict disabled plugins from RAM registry immediately
                         sync_c.plugin_engine.unload_plugin(&p.name);
+                    }
+                }
+
+                // Evict deleted plugins from RAM
+                let loaded = sync_c.plugin_engine.get_all_manifests();
+                for m in loaded {
+                    if !active_names.contains(&m.name) {
+                        sync_c.plugin_engine.unload_plugin(&m.name);
                     }
                 }
             }
