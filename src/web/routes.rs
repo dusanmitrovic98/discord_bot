@@ -6,7 +6,7 @@ use axum::{
         header::{CACHE_CONTROL, CONTENT_TYPE},
         HeaderMap, StatusCode,
     },
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     Json,
 };
 use base64::Engine;

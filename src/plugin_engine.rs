@@ -34,7 +34,7 @@ pub struct PluginManifest {
     pub cron_interval_secs: Option<u64>,
     pub capabilities: Vec<String>,
     pub subscribed_events: Vec<String>,
-    pub requested_storage_bytes: u64, // Declared storage quota
+    pub requested_storage_bytes: u64,
 }
 
 impl Default for PluginManifest {
@@ -61,7 +61,6 @@ pub struct LoadedPlugin {
     pub allocated_storage_bytes: u64,
 }
 
-/// Execution context injected into each guest store
 pub struct PluginContext {
     pub plugin_name: String,
     pub allocated_storage_bytes: u64,
@@ -111,11 +110,9 @@ impl DynamicPluginEngine {
         }
     }
 
-    /// Builds Linker with host entropy AND namespaced KV storage bridge (NASA Rule 2 & 5)
     fn build_linker(&self) -> Result<Linker<PluginContext>> {
         let mut linker = Linker::new(&self.engine);
 
-        // 1. Host Entropy (CSPRNG)
         linker
             .func_wrap("env", "host_random_u32", || -> u32 {
                 rand::random::<u32>()
@@ -124,7 +121,6 @@ impl DynamicPluginEngine {
                 AegisError::PluginError(format!("Failed registering host_random_u32: {}", e))
             })?;
 
-        // 2. Namespaced Storage: host_kv_set(key_ptr, key_len, val_ptr, val_len) -> i32
         linker
             .func_wrap(
                 "env",
@@ -145,18 +141,17 @@ impl DynamicPluginEngine {
                     let mem = memory.data(&caller);
 
                     if kp + kl > mem.len() || vp + vl > mem.len() {
-                        return -1; // Out-of-bounds pointer
+                        return -1;
                     }
 
-                    // Enforce allocated storage quota (NASA Rule 2)
                     let total_write_bytes = (kl + vl) as u64;
                     if total_write_bytes > caller.data().allocated_storage_bytes {
-                        return -4; // Quota exceeded
+                        return -4;
                     }
 
                     let key_str = match std::str::from_utf8(&mem[kp..kp + kl]) {
                         Ok(s) => s.to_string(),
-                        Err(_) => return -2, // Invalid UTF-8
+                        Err(_) => return -2,
                     };
                     let val_str = match std::str::from_utf8(&mem[vp..vp + vl]) {
                         Ok(s) => s.to_string(),
@@ -170,9 +165,9 @@ impl DynamicPluginEngine {
                                 let _ = db.plugin_kv_set(&plugin_name, &key_str, &val_str).await;
                             });
                         });
-                        0 // Success
+                        0
                     } else {
-                        -3 // DB unavailable
+                        -3
                     }
                 },
             )
@@ -180,7 +175,6 @@ impl DynamicPluginEngine {
                 AegisError::PluginError(format!("Failed registering host_kv_set: {}", e))
             })?;
 
-        // 3. Namespaced Storage: host_kv_get(key_ptr, key_len) -> i64 (packed ptr/len)
         linker
             .func_wrap(
                 "env",
@@ -217,7 +211,7 @@ impl DynamicPluginEngine {
 
                     let val_str = match val_opt {
                         Some(v) => v,
-                        None => return 0, // Key not found
+                        None => return 0,
                     };
 
                     let val_bytes = val_str.as_bytes();
@@ -234,13 +228,13 @@ impl DynamicPluginEngine {
                         Err(_) => return 0,
                     };
 
-                    let mut mem_mut =
-                        match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                            Some(m) => m,
-                            None => return 0,
-                        };
+                    let mem_target = match caller.get_export("memory").and_then(|e| e.into_memory())
+                    {
+                        Some(m) => m,
+                        None => return 0,
+                    };
 
-                    let data = mem_mut.data_mut(&mut caller);
+                    let data = mem_target.data_mut(&mut caller);
                     if out_ptr + val_bytes.len() <= data.len() {
                         data[out_ptr..out_ptr + val_bytes.len()].copy_from_slice(val_bytes);
                         ((out_ptr as i64) << 32) | (val_bytes.len() as i64)
@@ -262,11 +256,10 @@ impl DynamicPluginEngine {
 
         let manifest = self.extract_manifest(&module)?;
 
-        // Determine storage allocation: default 256KB or approved requested quota
         let allocated_storage = if manifest.requested_storage_bytes <= DEFAULT_STORAGE_QUOTA_BYTES {
             manifest.requested_storage_bytes
         } else {
-            DEFAULT_STORAGE_QUOTA_BYTES // Clamped to baseline until approved by Owner
+            DEFAULT_STORAGE_QUOTA_BYTES
         };
 
         let mut write_guard = self
