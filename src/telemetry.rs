@@ -1,3 +1,8 @@
+//! # In-Memory Real-Time Telemetry & Log Buffer
+//!
+//! Provides a thread-safe circular ring buffer (max 500 lines) capturing live
+//! application logs from both the supervisor and the piped child bot core.
+
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
@@ -39,6 +44,33 @@ impl LogBuffer {
             guard.pop_front();
         }
         guard.push_back(entry);
+    }
+
+    /// Parses raw stdout lines from the child core process and ingests them into the live buffer
+    pub fn push_raw_line(&self, raw: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut level = "INFO";
+        if raw.contains("ERROR") {
+            level = "ERROR";
+        } else if raw.contains("WARN") {
+            level = "WARN";
+        } else if raw.contains("DEBUG") {
+            level = "DEBUG";
+        }
+
+        let mut target = "bot_core";
+        if let Some(start) = raw.find("aegis_bastion::") {
+            if let Some(end) = raw[start..].find(':') {
+                target = &raw[start..start + end];
+            }
+        }
+
+        self.push(LiveLogEntry {
+            timestamp: now,
+            level: level.to_string(),
+            target: target.to_string(),
+            message: raw.to_string(),
+        });
     }
 }
 
