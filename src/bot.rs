@@ -3,7 +3,7 @@
 use serenity::async_trait;
 use serenity::builder::{
     CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse,
 };
 use serenity::model::application::{
     CommandDataOptionValue, CommandInteraction, CommandOptionType, Interaction,
@@ -11,7 +11,7 @@ use serenity::model::application::{
 use serenity::model::channel::{Message, Reaction};
 use serenity::model::gateway::Ready;
 use serenity::model::guild::{Guild, Member};
-use serenity::model::id::{GuildId, UserId};
+use serenity::model::id::{ChannelId, GuildId, UserId};
 use serenity::model::user::User;
 use serenity::model::voice::VoiceState;
 use serenity::prelude::*;
@@ -186,6 +186,18 @@ impl EventHandler for Handler {
         match guild_id.set_commands(&ctx.http, commands).await {
             Ok(cmds) => info!("Registered {} slash commands.", cmds.len()),
             Err(e) => error!("Failed registering slash commands: {}", e),
+        }
+
+        // Post boot notification directly to #terminal (1492187958206533834)
+        let terminal_channel = ChannelId::new(c.config.terminal_channel_id);
+        if let Err(e) = terminal_channel
+            .send_message(
+                &ctx.http,
+                CreateMessage::new().content("Sebastian The Butler is online."),
+            )
+            .await
+        {
+            warn!("Could not send boot notice to #terminal channel: {}", e);
         }
     }
 
@@ -367,6 +379,8 @@ impl EventHandler for Handler {
         }
     }
 }
+
+// Subroutines (<40 lines each, NASA Rule 1 & 4)
 
 fn dispatch_plugin_event(c: &BotContainer, event_name: &str, data: serde_json::Value) {
     if c.plugin_engine.has_subscribers_for(event_name) {
@@ -707,6 +721,10 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
             for manifest in c.plugin_engine.get_all_manifests() {
                 if manifest.slash_commands.iter().any(|s| s.name == plugin_cmd) {
                     handled = true;
+                    info!(
+                        "Executing /{} from plugin '{}' for user {}",
+                        plugin_cmd, manifest.name, caller_id
+                    );
                     let opts_json = serde_json::to_string(&cmd.data.options).unwrap_or_default();
                     match c.plugin_engine.execute_slash_command(
                         &manifest.name,
@@ -714,6 +732,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                         &opts_json,
                     ) {
                         Ok(reply) => {
+                            info!("/{} output: '{}'", plugin_cmd, reply);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -724,6 +743,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                                 .await;
                         }
                         Err(e) => {
+                            tracing::error!("Plugin error on /{}: {}", plugin_cmd, e);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,

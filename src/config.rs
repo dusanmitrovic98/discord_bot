@@ -1,3 +1,5 @@
+//! # Guild Configuration & Authorization Matrix
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6,6 +8,7 @@ pub struct GuildConfig {
     pub welcome_channel_id: u64,
     pub mod_channel_id: u64,
     pub logs_channel_id: u64,
+    pub terminal_channel_id: u64,
     pub owner_user_id: u64,
     pub admin_role_id: u64,
     pub moderator_role_id: u64,
@@ -21,12 +24,13 @@ impl Default for GuildConfig {
             welcome_channel_id: 1385636052374520014,
             mod_channel_id: 1424824152417767628,
             logs_channel_id: 1492554211118809319,
+            terminal_channel_id: 1492187958206533834, // #terminal
             owner_user_id: 1015600709724557434,
             admin_role_id: 1491379177180626974,
             moderator_role_id: 1492192888426201351,
             sapphire_bot_id: 678344927997853742,
             nsfw_auto_delete_threshold: 70.0,
-            max_download_size_bytes: 15 * 1024 * 1024, // 15MB safety ceiling (NASA Rule 2)
+            max_download_size_bytes: 15 * 1024 * 1024,
         }
     }
 }
@@ -58,15 +62,12 @@ mod tests {
     fn test_config_authorization_rules() {
         let config = GuildConfig::default();
 
-        // Guild boundary assertion
         assert!(config.is_authorized_guild(1385636051330142369));
         assert!(!config.is_authorized_guild(999999999999999999));
 
-        // Sovereign Owner assertion
         assert!(config.is_owner(1015600709724557434));
         assert!(!config.is_owner(123456789));
 
-        // Staff RBAC assertion
         let admin_roles = vec![1491379177180626974];
         let mod_roles = vec![1492192888426201351];
         let random_roles = vec![111111111, 222222222];
@@ -74,7 +75,6 @@ mod tests {
         assert!(config.is_staff(999, &admin_roles));
         assert!(config.is_staff(999, &mod_roles));
         assert!(!config.is_staff(999, &random_roles));
-        // Owner is staff regardless of roles
         assert!(config.is_staff(1015600709724557434, &random_roles));
     }
 }
