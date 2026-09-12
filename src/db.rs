@@ -1,7 +1,7 @@
 //! # Database Engine & MongoDB Atlas Storage Layer
 //!
 //! Manages persistence for system blobs, dynamic regexes, dual-layer whitelists,
-//! perceptual blacklists, audit logs, and sandboxed WASM plugin storage.
+//! blacklists, audit logs, and sandboxed WASM plugin storage.
 
 use crate::{AegisError, Result};
 use mongodb::{
@@ -40,7 +40,7 @@ pub struct WhitelistedUser {
 pub struct WhitelistedImage {
     pub sha256: String,
     #[serde(default)]
-    pub dhash: u64,
+    pub dhash: String,
     pub label: String,
     pub added_by: String,
     pub created_at: BsonDateTime,
@@ -237,7 +237,7 @@ impl DatabaseEngine {
         Ok(users)
     }
 
-    /// Atomically records a whitelisted image and evicts exact SHA & dHash from blacklist
+    /// Stores dhash as hex string to prevent BSON u64 overflow crashes
     pub async fn add_whitelisted_image(
         &self,
         sha256: &str,
@@ -252,12 +252,18 @@ impl DatabaseEngine {
         }
         sig_coll.delete_many(doc! { "$or": filter }).await?;
 
+        let dhash_str = if dhash != 0 {
+            format!("{:016x}", dhash)
+        } else {
+            String::new()
+        };
+
         let wl_coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
         wl_coll.delete_many(doc! { "sha256": sha256 }).await?;
         wl_coll
             .insert_one(WhitelistedImage {
                 sha256: sha256.to_string(),
-                dhash,
+                dhash: dhash_str,
                 label: label.to_string(),
                 added_by: added_by.to_string(),
                 created_at: BsonDateTime::now(),

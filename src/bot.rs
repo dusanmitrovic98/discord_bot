@@ -1,7 +1,4 @@
 //! # Sebastian The Butler - Discord Bot Gateway Core
-//!
-//! Event handler coordinating text gatekeeping, perceptual media defense,
-//! dynamic slash commands, in-chat `/whitelist-image`, and gateway event multiplexing.
 
 use serenity::async_trait;
 use serenity::builder::{
@@ -129,7 +126,7 @@ impl EventHandler for Handler {
                         .required(false),
                 ),
             CreateCommand::new("whitelist-user")
-                .description("Exempt a user from Tier 2 soft rules")
+                .description("Exempt a user from soft rules")
                 .add_option(
                     CreateCommandOption::new(CommandOptionType::User, "user", "Target user")
                         .required(true),
@@ -139,13 +136,13 @@ impl EventHandler for Handler {
                         .required(false),
                 ),
             CreateCommand::new("whitelist-pfp")
-                .description("Mark a user's avatar as verified safe")
+                .description("Mark a user's avatar as safe")
                 .add_option(
                     CreateCommandOption::new(CommandOptionType::User, "user", "Target user")
                         .required(true),
                 ),
             CreateCommand::new("whitelist-image")
-                .description("Whitelist any image by URL, Attachment, or SHA-256 Hash")
+                .description("Whitelist an image by URL, upload, or SHA-256")
                 .add_option(
                     CreateCommandOption::new(
                         CommandOptionType::String,
@@ -158,58 +155,44 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(
                         CommandOptionType::Attachment,
                         "file",
-                        "Upload image file directly",
+                        "Upload image directly",
                     )
                     .required(false),
                 )
                 .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "label",
-                        "Description/Label",
-                    )
-                    .required(false),
+                    CreateCommandOption::new(CommandOptionType::String, "label", "Label")
+                        .required(false),
                 ),
             CreateCommand::new("notify-user")
-                .description("Dispatch an official Butler notice to a member's DM")
+                .description("Send a notice to a member's DM")
                 .add_option(
                     CreateCommandOption::new(CommandOptionType::User, "user", "Target user")
                         .required(true),
                 )
                 .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "message",
-                        "Message content",
-                    )
-                    .required(true),
+                    CreateCommandOption::new(CommandOptionType::String, "message", "Message")
+                        .required(true),
                 ),
-            CreateCommand::new("db-stats").description("Audit MongoDB cloud storage usage"),
+            CreateCommand::new("db-stats").description("Check MongoDB storage usage"),
         ];
 
         for manifest in c.plugin_engine.get_all_manifests() {
             for def in manifest.slash_commands {
-                info!("🧩 Registering plugin slash command: /{}", def.name);
+                info!("Registering plugin slash command: /{}", def.name);
                 commands.push(CreateCommand::new(&def.name).description(&def.description));
             }
         }
 
         match guild_id.set_commands(&ctx.http, commands).await {
-            Ok(cmds) => info!(
-                "✅ Successfully registered {} Discord slash commands.",
-                cmds.len()
-            ),
-            Err(e) => error!("❌ Failed registering Discord slash commands: {}", e),
+            Ok(cmds) => info!("Registered {} slash commands.", cmds.len()),
+            Err(e) => error!("Failed registering slash commands: {}", e),
         }
     }
 
     async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
         let container = get_container(&ctx).await;
         if !container.config.is_authorized_guild(guild.id.get()) {
-            warn!(
-                "🚨 Evicting from unauthorized guild: {} ({})",
-                guild.name, guild.id
-            );
+            warn!("Leaving unauthorized guild: {} ({})", guild.name, guild.id);
             let _ = guild.leave(&ctx.http).await;
         }
     }
@@ -251,7 +234,7 @@ impl EventHandler for Handler {
                 &ctx.http,
                 member.guild_id,
                 user_id,
-                &format!("Predatory Name: {}", eval.offending_name),
+                &format!("Name violation: {}", eval.offending_name),
                 1.0,
                 &c.db,
                 &c.config,
@@ -260,7 +243,7 @@ impl EventHandler for Handler {
             send_mod_alert(
                 &ctx,
                 &c.config,
-                "Predatory User Banned on Join",
+                "User Banned on Join",
                 &format!("Banned <@{}> for name `{}`", user_id, eval.offending_name),
                 user_id,
             )
@@ -385,8 +368,6 @@ impl EventHandler for Handler {
     }
 }
 
-// Subroutines (<40 lines each, NASA Rule 1 & 4)
-
 fn dispatch_plugin_event(c: &BotContainer, event_name: &str, data: serde_json::Value) {
     if c.plugin_engine.has_subscribers_for(event_name) {
         c.plugin_engine
@@ -426,7 +407,7 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
                     &ctx.http,
                     gid,
                     author_id,
-                    &format!("Predatory Name: {}", eval.offending_name),
+                    &format!("Name violation: {}", eval.offending_name),
                     1.0,
                     &c.db,
                     &c.config,
@@ -435,7 +416,7 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
                 send_mod_alert(
                     ctx,
                     &c.config,
-                    "Predatory User Banned",
+                    "User Banned",
                     &format!("Banned <@{}>", author_id),
                     author_id,
                 )
@@ -448,9 +429,9 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
             send_mod_alert(
                 ctx,
                 &c.config,
-                "Message Purged (Soft Rule)",
+                "Message Removed",
                 &format!(
-                    "Purged message from <@{}> for name `{}`",
+                    "Removed message from <@{}> for `{}`",
                     author_id, eval.offending_name
                 ),
                 author_id,
@@ -492,16 +473,16 @@ async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> boo
                 send_mod_alert(
                     ctx,
                     &c.config,
-                    "Message Blocked (NSFW Avatar)",
-                    &format!("Blocked <@{}> (holds adult avatar)", author_id),
+                    "Message Blocked (Avatar)",
+                    &format!("Blocked <@{}> (avatar flagged)", author_id),
                     author_id,
                 )
                 .await;
                 send_logs_evidence(
                     ctx,
                     &c.config,
-                    "Blocked NSFW Avatar",
-                    &format!("User <@{}> avatar is blacklisted", author_id),
+                    "Blocked Avatar",
+                    &format!("User <@{}> avatar flagged", author_id),
                     author_id,
                     payload.bytes,
                 )
@@ -530,16 +511,16 @@ async fn handle_join_avatar(
             send_mod_alert(
                 ctx,
                 &c.config,
-                "Known Adult Avatar on Join",
-                &format!("User <@{}> holds blacklisted avatar", user_id),
+                "Flagged Avatar on Join",
+                &format!("User <@{}> holds flagged avatar", user_id),
                 user_id,
             )
             .await;
             send_logs_evidence(
                 ctx,
                 &c.config,
-                "Known Adult Avatar",
-                &format!("User <@{}> avatar blacklisted", user_id),
+                "Flagged Avatar",
+                &format!("User <@{}> avatar flagged", user_id),
                 user_id,
                 payload.bytes,
             )
@@ -566,7 +547,7 @@ async fn handle_join_avatar(
                         send_mod_alert(
                             &ctx_c,
                             &cfg,
-                            "Adult Avatar Detected",
+                            "Flagged Avatar Detected",
                             &format!(
                                 "User <@{}> avatar flagged ({:.1}%)",
                                 user_id, resp.confidence.nsfw
@@ -577,7 +558,7 @@ async fn handle_join_avatar(
                         send_logs_evidence(
                             &ctx_c,
                             &cfg,
-                            "Adult Avatar Evidence",
+                            "Flagged Avatar Evidence",
                             &format!("User <@{}> avatar flagged", user_id),
                             user_id,
                             payload.bytes,
@@ -631,16 +612,16 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
                     send_mod_alert(
                         ctx,
                         &c.config,
-                        "NSFW Media Deleted (Cache)",
-                        &format!("Purged media from <@{}> in <#{}>", author_id, ch_id.get()),
+                        "Media Removed (Cache)",
+                        &format!("Removed media from <@{}> in <#{}>", author_id, ch_id.get()),
                         author_id,
                     )
                     .await;
                     send_logs_evidence(
                         ctx,
                         &c.config,
-                        "NSFW Media Deleted",
-                        &format!("Purged from <@{}>", author_id),
+                        "Media Removed",
+                        &format!("Removed from <@{}>", author_id),
                         author_id,
                         payload.bytes,
                     )
@@ -665,9 +646,9 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
                                 send_mod_alert(
                                     &ctx_c,
                                     &cfg,
-                                    "NSFW Media Deleted",
+                                    "Media Removed",
                                     &format!(
-                                        "Purged from <@{}> ({:.1}%)",
+                                        "Removed from <@{}> ({:.1}%)",
                                         author_id, resp.confidence.nsfw
                                     ),
                                     author_id,
@@ -676,7 +657,7 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
                                 send_logs_evidence(
                                     &ctx_c,
                                     &cfg,
-                                    "NSFW Media Evidence",
+                                    "Media Evidence",
                                     &format!("Flagged from <@{}>", author_id),
                                     author_id,
                                     payload.bytes,
@@ -705,7 +686,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                 &ctx.http,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content("⛔ **Access Denied:** Staff role required.")
+                        .content("Staff role required.")
                         .ephemeral(true),
                 ),
             )
@@ -726,10 +707,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
             for manifest in c.plugin_engine.get_all_manifests() {
                 if manifest.slash_commands.iter().any(|s| s.name == plugin_cmd) {
                     handled = true;
-                    info!(
-                        "🧩 [PLUGIN] Executing /{} from plugin '{}' for user {}",
-                        plugin_cmd, manifest.name, caller_id
-                    );
                     let opts_json = serde_json::to_string(&cmd.data.options).unwrap_or_default();
                     match c.plugin_engine.execute_slash_command(
                         &manifest.name,
@@ -737,7 +714,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                         &opts_json,
                     ) {
                         Ok(reply) => {
-                            info!("🎲 [PLUGIN RESULT] /{} output: '{}'", plugin_cmd, reply);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -748,13 +724,12 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                                 .await;
                         }
                         Err(e) => {
-                            tracing::error!("❌ [PLUGIN ERROR] /{} trapped: {}", plugin_cmd, e);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
                                     CreateInteractionResponse::Message(
                                         CreateInteractionResponseMessage::new()
-                                            .content(format!("❌ Plugin execution trapped: {}", e))
+                                            .content(format!("Plugin error: {}", e))
                                             .ephemeral(true),
                                     ),
                                 )
@@ -789,7 +764,7 @@ async fn cmd_test_name(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction
         .unwrap_or("");
     let verdict = c.gatekeeper.evaluate_threat(text);
     let (norm, alpha, deduped) = c.gatekeeper.canonicalize(text);
-    let reply = format!("🧪 **Gatekeeper Test:** `{}`\n> **Verdict:** {:?}\n> **Normalized:** `{}`\n> **Alphanumeric:** `{}`\n> **Deduped:** `{}`", text, verdict, norm, alpha, deduped);
+    let reply = format!("**Gatekeeper Test:** `{}`\n> **Verdict:** {:?}\n> **Normalized:** `{}`\n> **Alphanumeric:** `{}`\n> **Deduped:** `{}`", text, verdict, norm, alpha, deduped);
     let _ = cmd
         .create_response(
             &ctx.http,
@@ -836,7 +811,7 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
         let _ = cmd
             .edit_response(
                 &ctx.http,
-                EditInteractionResponse::new().content("❌ No avatar or image found to analyze."),
+                EditInteractionResponse::new().content("No avatar or image found to analyze."),
             )
             .await;
         return;
@@ -846,7 +821,7 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
         let _ = cmd
             .edit_response(
                 &ctx.http,
-                EditInteractionResponse::new().content("❌ Failed downloading image."),
+                EditInteractionResponse::new().content("Failed downloading image."),
             )
             .await;
         return;
@@ -873,23 +848,23 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     if c.scan_queue.submit(task).await.is_ok() {
         if let Ok(Ok(resp)) = rx.await {
             let verdict_str = if is_whitelisted {
-                "🟢 **VERIFIED SAFE (Whitelisted)**"
+                "Safe (Whitelisted)"
             } else if resp.confidence.nsfw >= c.config.nsfw_auto_delete_threshold || is_blacklisted
             {
-                "🚨 **NSFW (Flagged)**"
+                "Flagged"
             } else {
-                "✅ **SAFE**"
+                "Safe"
             };
 
             let reply = format!(
-                "🧪 **Avatar ViT Classifier Test**\n\
+                "**Image Test**\n\
                 > **URL:** {}\n\
                 > **SHA-256:** `{}`\n\
                 > **dHash:** `{:016x}`\n\
-                > **Cache:** Whitelisted: `{}` | Blacklisted: `{}`\n\
+                > **Status:** Whitelisted: `{}` | Blacklisted: `{}`\n\
                 > **Verdict:** {}\n\
-                > **Confidence:** Safe: `{:.1}%` | NSFW: `{:.1}%`\n\
-                > **Inference Latency:** `{}`",
+                > **Confidence:** Safe: `{:.1}%` | Flagged: `{:.1}%`\n\
+                > **Latency:** `{}`",
                 url,
                 payload.sha256,
                 payload.dhash,
@@ -904,9 +879,9 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
             send_owner_diagnostic(
                 &ctx.http,
                 &c.config,
-                "Test PFP Evaluation",
+                "Test PFP Result",
                 &format!(
-                    "**Caller:** <@{}>\n**Target:** <@{}>\n**SHA-256:** `{}`\n**dHash:** `{:016x}`\n**Verdict:** {}\n**Confidence:** Safe: `{:.1}%` | NSFW: `{:.1}%`",
+                    "Caller: <@{}>\nTarget: <@{}>\nSHA-256: `{}`\ndHash: `{:016x}`\nVerdict: {}\nConfidence: Safe: `{:.1}%` | Flagged: `{:.1}%`",
                     cmd.user.id.get(), target_user_id, payload.sha256, payload.dhash, verdict_str, resp.confidence.safe, resp.confidence.nsfw
                 ),
             ).await;
@@ -921,7 +896,7 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     let _ = cmd
         .edit_response(
             &ctx.http,
-            EditInteractionResponse::new().content("❌ AI Classifier queue timeout."),
+            EditInteractionResponse::new().content("Classification queue timeout."),
         )
         .await;
 }
@@ -952,7 +927,7 @@ async fn cmd_whitelist_user(ctx: &Context, c: &BotContainer, cmd: &CommandIntera
                 &ctx.http,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content("❌ Invalid user specified.")
+                        .content("Invalid user specified.")
                         .ephemeral(true),
                 ),
             )
@@ -974,14 +949,14 @@ async fn cmd_whitelist_user(ctx: &Context, c: &BotContainer, cmd: &CommandIntera
         &c.config,
         "User Whitelisted",
         &format!(
-            "**Target:** <@{}> (`{}`)\n**Staff:** {}\n**Reason:** `{}`",
+            "Target: <@{}> (`{}`)\nStaff: {}\nReason: `{}`",
             target_id, target_name, cmd.user.name, reason
         ),
     )
     .await;
 
     let reply = format!(
-        "✅ Whitelisted <@{}> (`{}`) by **{}** (Reason: `{}`).",
+        "Whitelisted <@{}> (`{}`) by **{}** (Reason: `{}`).",
         target_id, target_name, cmd.user.name, reason
     );
     let _ = cmd
@@ -1017,7 +992,7 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
                 &ctx.http,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content("❌ Target user has no custom avatar set to whitelist.")
+                        .content("Target user has no avatar set to whitelist.")
                         .ephemeral(true),
                 ),
             )
@@ -1026,7 +1001,7 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
     };
 
     if let Ok(payload) = c.media_inspector.inspect_url(&url).await {
-        let label = format!("PFP Whitelist: @{}", target_name);
+        let label = format!("PFP: @{}", target_name);
         let _ =
             c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
                 .await;
@@ -1041,22 +1016,28 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
             &ctx.http,
             target_id,
             "Profile Picture Verified Safe",
-            "Your profile picture has been reviewed by server staff and marked **Verified Safe**. Your permissions are fully restored!",
+            "Your profile picture has been reviewed by server staff and marked safe. Your permissions are fully restored!",
         ).await;
 
         send_owner_diagnostic(
             &ctx.http,
             &c.config,
-            "PFP Whitelist Executed",
+            "PFP Whitelisted",
             &format!(
-                "**Target:** <@{}> (`{}`)\n**Staff:** {}\n**SHA-256:** `{}`\n**dHash:** `{:016x}`\n**Member DM Sent:** {}",
-                target_id, target_name, cmd.user.name, payload.sha256, payload.dhash, if notified { "Delivered ✅" } else { "Closed DMs ⚠️" }
+                "Target: <@{}> (`{}`)\nStaff: {}\nSHA-256: `{}`\ndHash: `{:016x}`\nMember DM: {}",
+                target_id,
+                target_name,
+                cmd.user.name,
+                payload.sha256,
+                payload.dhash,
+                if notified { "Delivered" } else { "Closed DMs" }
             ),
-        ).await;
+        )
+        .await;
 
         let reply = format!(
-            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n*This image and its resized variants permanently bypass all filters. (User Notified: {})*",
-            target_id, payload.sha256, payload.dhash, if notified { "Yes ✅" } else { "DMs Disabled ⚠️" }
+            "**Avatar Whitelisted:** <@{}>\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\nThis image is marked safe. (Notified: {})",
+            target_id, payload.sha256, payload.dhash, if notified { "Yes" } else { "DMs Disabled" }
         );
         let _ = cmd
             .create_response(
@@ -1074,7 +1055,7 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
             &ctx.http,
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
-                    .content("❌ Failed downloading user avatar.")
+                    .content("Failed downloading user avatar.")
                     .ephemeral(true),
             ),
         )
@@ -1122,14 +1103,14 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
             &c.config,
             "Direct SHA-256 Whitelisted",
             &format!(
-                "**SHA-256:** `{}`\n**Staff:** {}\n**Label:** `{}`",
+                "SHA-256: `{}`\nStaff: {}\nLabel: `{}`",
                 sha_clean, cmd.user.name, label
             ),
         )
         .await;
 
         let reply = format!(
-            "✅ **Image Whitelisted via SHA-256 Hash:**\n> **SHA-256:** `{}`\n> **Label:** `{}`\n*Blacklist revoked and safe signature memorized.*",
+            "**Image Whitelisted:**\n> **SHA-256:** `{}`\n> **Label:** `{}`\nThis image is marked safe.",
             sha_clean, label
         );
         let _ = cmd
@@ -1151,7 +1132,7 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
             .edit_response(
                 &ctx.http,
                 EditInteractionResponse::new().content(
-                    "❌ Provide a valid image URL, attachment, or 64-character SHA-256 hash.",
+                    "Provide a valid image URL, attachment, or 64-character SHA-256 hash.",
                 ),
             )
             .await;
@@ -1162,7 +1143,7 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
         let _ = cmd
             .edit_response(
                 &ctx.http,
-                EditInteractionResponse::new().content("❌ Failed downloading image from source."),
+                EditInteractionResponse::new().content("Failed downloading image from source."),
             )
             .await;
         return;
@@ -1184,14 +1165,14 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
         &c.config,
         "Image Whitelisted",
         &format!(
-            "**Staff:** {}\n**SHA-256:** `{}`\n**dHash:** `{:016x}`\n**Label:** `{}`",
+            "Staff: {}\nSHA-256: `{}`\ndHash: `{:016x}`\nLabel: `{}`",
             cmd.user.name, payload.sha256, payload.dhash, label
         ),
     )
     .await;
 
     let reply = format!(
-        "✅ **Image Whitelisted:**\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n> **Label:** `{}`\n*Perceptual signature memorized. All matching variations are now verified safe.*",
+        "**Image Whitelisted:**\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n> **Label:** `{}`\nThis image is marked safe.",
         payload.sha256, payload.dhash, label
     );
     let _ = cmd
@@ -1221,7 +1202,7 @@ async fn cmd_notify_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteracti
                 &ctx.http,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content("❌ Missing user or message parameter.")
+                        .content("Missing user or message parameter.")
                         .ephemeral(true),
                 ),
             )
@@ -1240,26 +1221,22 @@ async fn cmd_notify_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteracti
     send_owner_diagnostic(
         &ctx.http,
         &c.config,
-        "Manual User Notification Dispatched",
+        "User Notified",
         &format!(
-            "**Staff:** {}\n**Target:** <@{}>\n**Status:** {}\n**Content:**\n> {}",
+            "Staff: {}\nTarget: <@{}>\nStatus: {}\nMessage: {}",
             cmd.user.name,
             target_id,
-            if delivered {
-                "Delivered ✅"
-            } else {
-                "Failed (DMs Closed) ⚠️"
-            },
+            if delivered { "Delivered" } else { "Closed DMs" },
             message_text
         ),
     )
     .await;
 
     let reply = if delivered {
-        format!("✅ Notification delivered to <@{}> DM.", target_id)
+        format!("Notification delivered to <@{}>.", target_id)
     } else {
         format!(
-            "⚠️ Could not deliver DM to <@{}> (User has direct messages closed).",
+            "Could not send DM to <@{}> (User has DMs closed).",
             target_id
         )
     };
@@ -1282,13 +1259,13 @@ async fn cmd_db_stats(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
             let u_mb = used as f64 / (1024.0 * 1024.0);
             let m_mb = max as f64 / (1024.0 * 1024.0);
             format!(
-                "📊 **MongoDB Atlas M0 Storage:** `{:.2} MB` / `{:.0} MB` (Remaining: `{:.2} MB`)",
+                "MongoDB Storage: `{:.2} MB` / `{:.0} MB` (Remaining: `{:.2} MB`)",
                 u_mb,
                 m_mb,
                 m_mb - u_mb
             )
         }
-        Err(e) => format!("❌ Failed: {}", e),
+        Err(e) => format!("Failed: {}", e),
     };
     let _ = cmd
         .create_response(
@@ -1310,10 +1287,7 @@ pub async fn execute_ban(
     config: &GuildConfig,
 ) {
     if config.is_owner(user_id) {
-        warn!(
-            "🛡️ [SOVEREIGN IMMUNITY] Refusing ban against Architect ({}).",
-            user_id
-        );
+        warn!("Refusing ban against Owner ({}).", user_id);
         return;
     }
     let user = UserId::new(user_id);
