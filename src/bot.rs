@@ -1,7 +1,7 @@
 //! # Sebastian The Butler - Discord Bot Gateway Core
 //!
 //! Event handler coordinating text gatekeeping, perceptual media defense,
-//! dynamic slash commands, and WASM microkernel gateway event multiplexing.
+//! dynamic slash commands, owner diagnostic DMs, and WASM microkernel gateway events.
 
 use serenity::async_trait;
 use serenity::builder::{
@@ -26,7 +26,9 @@ use crate::config::GuildConfig;
 use crate::db::{AuditLogEntry, DatabaseEngine};
 use crate::gatekeeper::{TextGatekeeper, ThreatVerdict};
 use crate::media::{MediaInspector, MediaPayload};
-use crate::pipeline::alerts::{send_logs_evidence, send_mod_alert};
+use crate::pipeline::alerts::{
+    send_logs_evidence, send_mod_alert, send_owner_diagnostic, send_user_notification,
+};
 use crate::pipeline::media_guard::{triage_media, MediaVerdict};
 use crate::pipeline::name_guard::evaluate_member_names;
 use crate::pipeline::sweeper::purge_welcome_channel_on_nsfw_join;
@@ -142,6 +144,16 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(CommandOptionType::User, "user", "Target user")
                         .required(true),
                 ),
+            CreateCommand::new("notify-user")
+                .description("Dispatch an official Butler notice to a member's DM")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::User, "user", "Target user")
+                        .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "message", "Message content")
+                        .required(true),
+                ),
             CreateCommand::new("db-stats").description("Audit MongoDB cloud storage usage"),
         ];
 
@@ -174,16 +186,11 @@ impl EventHandler for Handler {
 
         let user_id = member.user.id.get();
 
-        // Gateway event forwarder
-        dispatch_plugin_event(
-            &c,
-            "member_join",
-            serde_json::json!({
-                "guild_id": member.guild_id.get(),
-                "user_id": user_id,
-                "username": &member.user.name
-            }),
-        );
+        dispatch_plugin_event(&c, "member_join", serde_json::json!({
+            "guild_id": member.guild_id.get(),
+            "user_id": user_id,
+            "username": &member.user.name
+        }));
 
         let eval = evaluate_member_names(
             &c.gatekeeper,
@@ -244,59 +251,48 @@ impl EventHandler for Handler {
         _member_data: Option<Member>,
     ) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "member_leave",
-            serde_json::json!({
-                "guild_id": guild_id.get(),
-                "user_id": user.id.get(),
-                "username": &user.name
-            }),
-        );
+        dispatch_plugin_event(&c, "member_leave", serde_json::json!({
+            "guild_id": guild_id.get(),
+            "user_id": user.id.get(),
+            "username": &user.name
+        }));
     }
 
-    async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+    async fn voice_state_update(
+        &self,
+        ctx: Context,
+        old: Option<VoiceState>,
+        new: VoiceState,
+    ) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "voice_state_update",
-            serde_json::json!({
-                "user_id": new.user_id.get(),
-                "guild_id": new.guild_id.map(|g| g.get()),
-                "channel_id": new.channel_id.map(|c| c.get()),
-                "old_channel_id": old.and_then(|o| o.channel_id.map(|c| c.get())),
-                "self_mute": new.self_mute,
-                "self_deaf": new.self_deaf
-            }),
-        );
+        dispatch_plugin_event(&c, "voice_state_update", serde_json::json!({
+            "user_id": new.user_id.get(),
+            "guild_id": new.guild_id.map(|g| g.get()),
+            "channel_id": new.channel_id.map(|c| c.get()),
+            "old_channel_id": old.and_then(|o| o.channel_id.map(|c| c.get())),
+            "self_mute": new.self_mute,
+            "self_deaf": new.self_deaf
+        }));
     }
 
     async fn reaction_add(&self, ctx: Context, reaction: Reaction) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "reaction_add",
-            serde_json::json!({
-                "user_id": reaction.user_id.map(|u| u.get()),
-                "channel_id": reaction.channel_id.get(),
-                "message_id": reaction.message_id.get(),
-                "emoji": reaction.emoji.as_data()
-            }),
-        );
+        dispatch_plugin_event(&c, "reaction_add", serde_json::json!({
+            "user_id": reaction.user_id.map(|u| u.get()),
+            "channel_id": reaction.channel_id.get(),
+            "message_id": reaction.message_id.get(),
+            "emoji": reaction.emoji.as_data()
+        }));
     }
 
     async fn reaction_remove(&self, ctx: Context, reaction: Reaction) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "reaction_remove",
-            serde_json::json!({
-                "user_id": reaction.user_id.map(|u| u.get()),
-                "channel_id": reaction.channel_id.get(),
-                "message_id": reaction.message_id.get(),
-                "emoji": reaction.emoji.as_data()
-            }),
-        );
+        dispatch_plugin_event(&c, "reaction_remove", serde_json::json!({
+            "user_id": reaction.user_id.map(|u| u.get()),
+            "channel_id": reaction.channel_id.get(),
+            "message_id": reaction.message_id.get(),
+            "emoji": reaction.emoji.as_data()
+        }));
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -308,19 +304,14 @@ impl EventHandler for Handler {
             return;
         }
 
-        // Asynchronously broadcast to subscribed WASM plugins
-        dispatch_plugin_event(
-            &c,
-            "message_create",
-            serde_json::json!({
-                "id": msg.id.get(),
-                "channel_id": msg.channel_id.get(),
-                "author_id": msg.author.id.get(),
-                "author_name": &msg.author.name,
-                "content": &msg.content,
-                "is_bot": msg.author.bot
-            }),
-        );
+        dispatch_plugin_event(&c, "message_create", serde_json::json!({
+            "id": msg.id.get(),
+            "channel_id": msg.channel_id.get(),
+            "author_id": msg.author.id.get(),
+            "author_name": &msg.author.name,
+            "content": &msg.content,
+            "is_bot": msg.author.bot
+        }));
 
         if guard_author_names(&ctx, &c, &msg).await {
             return;
@@ -343,8 +334,7 @@ impl EventHandler for Handler {
 
 fn dispatch_plugin_event(c: &BotContainer, event_name: &str, data: serde_json::Value) {
     if c.plugin_engine.has_subscribers_for(event_name) {
-        c.plugin_engine
-            .dispatch_event(event_name, &data.to_string());
+        c.plugin_engine.dispatch_event(event_name, &data.to_string());
     }
 }
 
@@ -419,10 +409,7 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
 async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> bool {
     if let Some(avatar_url) = msg.author.avatar_url() {
         if let Ok(payload) = c.media_inspector.inspect_url(&avatar_url).await {
-            if !c
-                .whitelist
-                .is_image_safe(&payload.sha256, payload.dhash)
-                .await
+            if !c.whitelist.is_image_safe(&payload.sha256, payload.dhash).await
                 && c.db
                     .is_image_blacklisted(&payload.sha256)
                     .await
@@ -430,6 +417,20 @@ async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> boo
             {
                 let _ = msg.delete(&ctx.http).await;
                 let author_id = msg.author.id.get();
+
+                // Courteous false-positive notification to user (NASA Rule 5)
+                tokio::spawn({
+                    let http = ctx.http.clone();
+                    async move {
+                        send_user_notification(
+                            &http,
+                            author_id,
+                            "Notice Regarding Your Profile Picture",
+                            "Your message was held because your profile picture is currently being reviewed by server safety filters.",
+                        ).await;
+                    }
+                });
+
                 send_mod_alert(
                     ctx,
                     &c.config,
@@ -659,16 +660,14 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
         "test-pfp" => cmd_test_pfp(ctx, c, &cmd).await,
         "whitelist-user" => cmd_whitelist_user(ctx, c, &cmd).await,
         "whitelist-pfp" => cmd_whitelist_pfp(ctx, c, &cmd).await,
+        "notify-user" => cmd_notify_user(ctx, c, &cmd).await,
         "db-stats" => cmd_db_stats(ctx, c, &cmd).await,
         plugin_cmd => {
             let mut handled = false;
             for manifest in c.plugin_engine.get_all_manifests() {
                 if manifest.slash_commands.iter().any(|s| s.name == plugin_cmd) {
                     handled = true;
-                    info!(
-                        "🧩 [PLUGIN] Executing /{} from plugin '{}' for user {}",
-                        plugin_cmd, manifest.name, caller_id
-                    );
+                    info!("🧩 [PLUGIN] Executing /{} from plugin '{}' for user {}", plugin_cmd, manifest.name, caller_id);
                     let opts_json = serde_json::to_string(&cmd.data.options).unwrap_or_default();
                     match c.plugin_engine.execute_slash_command(
                         &manifest.name,
@@ -743,6 +742,7 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     let _ = cmd.defer(&ctx.http).await;
 
     let mut target_url = None;
+    let mut target_user_id = cmd.user.id.get();
     for opt in &cmd.data.options {
         if opt.name == "image" {
             if let CommandDataOptionValue::Attachment(att_id) = &opt.value {
@@ -755,6 +755,7 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
             }
         } else if opt.name == "user" {
             if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_user_id = uid.get();
                 target_url = cmd
                     .data
                     .resolved
@@ -789,10 +790,7 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
         return;
     };
 
-    let is_whitelisted = c
-        .whitelist
-        .is_image_safe(&payload.sha256, payload.dhash)
-        .await;
+    let is_whitelisted = c.whitelist.is_image_safe(&payload.sha256, payload.dhash).await;
     let is_blacklisted =
         c.db.is_image_blacklisted(&payload.sha256)
             .await
@@ -837,6 +835,17 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
                 resp.confidence.nsfw,
                 resp.processing_time
             );
+
+            // Dispatch tangible diagnostic proof directly to Sovereign Owner's DM
+            send_owner_diagnostic(
+                &ctx.http,
+                &c.config,
+                "Test PFP Evaluation",
+                &format!(
+                    "**Caller:** <@{}>\n**Target:** <@{}>\n**SHA-256:** `{}`\n**dHash:** `{:016x}`\n**Verdict:** {}\n**Confidence:** Safe: `{:.1}%` | NSFW: `{:.1}%`",
+                    cmd.user.id.get(), target_user_id, payload.sha256, payload.dhash, verdict_str, resp.confidence.safe, resp.confidence.nsfw
+                ),
+            ).await;
 
             let _ = cmd
                 .edit_response(&ctx.http, EditInteractionResponse::new().content(reply))
@@ -896,6 +905,14 @@ async fn cmd_whitelist_user(ctx: &Context, c: &BotContainer, cmd: &CommandIntera
     c.whitelist.add_user(&target_name).await;
     c.whitelist.add_user(&target_id.to_string()).await;
 
+    // Dispatch proof to Owner DM
+    send_owner_diagnostic(
+        &ctx.http,
+        &c.config,
+        "User Whitelisted",
+        &format!("**Target:** <@{}> (`{}`)\n**Staff:** {}\n**Reason:** `{}`", target_id, target_name, cmd.user.name, reason),
+    ).await;
+
     let reply = format!(
         "✅ Whitelisted <@{}> (`{}`) by **{}** (Reason: `{}`).",
         target_id, target_name, cmd.user.name, reason
@@ -943,9 +960,10 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
 
     if let Ok(payload) = c.media_inspector.inspect_url(&url).await {
         let label = format!("PFP Whitelist: @{}", target_name);
-        let _ =
-            c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
-                .await;
+        let _ = c
+            .db
+            .add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
+            .await;
         c.whitelist.add_image(&payload.sha256, payload.dhash).await;
 
         if payload.dhash != 0 {
@@ -953,9 +971,28 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
             guard.retain(|&banned| (banned ^ payload.dhash).count_ones() > 6);
         }
 
+        // Notify member that their avatar was verified safe
+        let notified = send_user_notification(
+            &ctx.http,
+            target_id,
+            "Profile Picture Verified Safe",
+            "Your profile picture has been reviewed by server staff and marked **Verified Safe**. Your permissions are fully restored!",
+        ).await;
+
+        // Dispatch proof directly to Sovereign Owner's DM
+        send_owner_diagnostic(
+            &ctx.http,
+            &c.config,
+            "PFP Whitelist Executed",
+            &format!(
+                "**Target:** <@{}> (`{}`)\n**Staff:** {}\n**SHA-256:** `{}`\n**dHash:** `{:016x}`\n**Member DM Sent:** {}",
+                target_id, target_name, cmd.user.name, payload.sha256, payload.dhash, if notified { "Delivered ✅" } else { "Closed DMs ⚠️" }
+            ),
+        ).await;
+
         let reply = format!(
-            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n*This image and its resized variants permanently bypass all filters.*",
-            target_id, payload.sha256, payload.dhash
+            "✅ **Avatar Whitelisted:** Avatar for <@{}> is marked **Verified Safe**.\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n*This image and its resized variants permanently bypass all filters. (User Notified: {})*",
+            target_id, payload.sha256, payload.dhash, if notified { "Yes ✅" } else { "DMs Disabled ⚠️" }
         );
         let _ = cmd
             .create_response(
@@ -975,6 +1012,70 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
                 CreateInteractionResponseMessage::new()
                     .content("❌ Failed downloading user avatar.")
                     .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_notify_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let mut target_id = 0u64;
+    let mut message_text = String::new();
+
+    for opt in &cmd.data.options {
+        if opt.name == "user" {
+            if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_id = uid.get();
+            }
+        } else if opt.name == "message" {
+            if let CommandDataOptionValue::String(m) = &opt.value {
+                message_text = m.clone();
+            }
+        }
+    }
+
+    if target_id == 0 || message_text.is_empty() {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("❌ Missing user or message parameter.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let delivered = send_user_notification(
+        &ctx.http,
+        target_id,
+        "Notice from Server Staff",
+        &message_text,
+    ).await;
+
+    // Send proof to Owner DM
+    send_owner_diagnostic(
+        &ctx.http,
+        &c.config,
+        "Manual User Notification Dispatched",
+        &format!(
+            "**Staff:** {}\n**Target:** <@{}>\n**Status:** {}\n**Content:**\n> {}",
+            cmd.user.name, target_id, if delivered { "Delivered ✅" } else { "Failed (DMs Closed) ⚠️" }, message_text
+        ),
+    ).await;
+
+    let reply = if delivered {
+        format!("✅ Notification delivered to <@{}> DM.", target_id)
+    } else {
+        format!("⚠️ Could not deliver DM to <@{}> (User has direct messages closed).", target_id)
+    };
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().content(reply).ephemeral(true),
             ),
         )
         .await;

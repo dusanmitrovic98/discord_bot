@@ -35,6 +35,43 @@ deunicode = "1.6"
 regex = "1.10"
 
 # Networking & HTTP Client
+[package]
+name = "discord-bot"
+version = "0.1.0"
+edition = "2021"
+authors = ["The Architect", "Gaia"]
+
+[dependencies]
+# Concurrency & Async
+tokio = { version = "1.39", features = ["full"] }
+futures = "0.3"
+
+# Discord Gateway
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "cache"] }
+
+# Database & Storage
+mongodb = "3.1"
+bson = { version = "2.11", features = ["chrono-0_4"] }
+
+# Web Framework & Dashboard API
+axum = { version = "0.7", features = ["json", "form"] }
+tower-http = { version = "0.5", features = ["cors"] }
+argon2 = "0.5"
+
+# Security & Hashing
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+
+# Image Processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+# Text Normalization & Anti-Evasion
+deunicode = "1.6"
+regex = "1.10"
+
+# Networking & HTTP Client
 reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 
 # WASM Sandboxed Plugin Engine
@@ -78,3 +115,4 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
