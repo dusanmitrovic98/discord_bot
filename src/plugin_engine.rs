@@ -195,7 +195,7 @@ impl DynamicPluginEngine {
                 )
                 .await;
 
-                if let Err(_) = timeout_res {
+                if timeout_res.is_err() {
                     tracing::warn!(
                         "⚠️ [EVENT TIMEOUT] Plugin '{}' timed out on '{}'",
                         name,

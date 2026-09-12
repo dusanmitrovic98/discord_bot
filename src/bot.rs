@@ -1,7 +1,7 @@
 //! # Sebastian The Butler - Discord Bot Gateway Core
 //!
 //! Event handler coordinating text gatekeeping, perceptual media defense,
-//! dynamic slash commands, owner diagnostic DMs, and WASM microkernel gateway events.
+//! dynamic slash commands, in-chat `/whitelist-image`, and gateway event multiplexing.
 
 use serenity::async_trait;
 use serenity::builder::{
@@ -20,7 +20,7 @@ use serenity::model::voice::VoiceState;
 use serenity::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::GuildConfig;
 use crate::db::{AuditLogEntry, DatabaseEngine};
@@ -144,6 +144,32 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(CommandOptionType::User, "user", "Target user")
                         .required(true),
                 ),
+            CreateCommand::new("whitelist-image")
+                .description("Whitelist any image by URL, Attachment, or SHA-256 Hash")
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "input",
+                        "Image URL or SHA-256 Hash",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::Attachment,
+                        "file",
+                        "Upload image file directly",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "label",
+                        "Description/Label",
+                    )
+                    .required(false),
+                ),
             CreateCommand::new("notify-user")
                 .description("Dispatch an official Butler notice to a member's DM")
                 .add_option(
@@ -168,7 +194,13 @@ impl EventHandler for Handler {
             }
         }
 
-        let _ = guild_id.set_commands(&ctx.http, commands).await;
+        match guild_id.set_commands(&ctx.http, commands).await {
+            Ok(cmds) => info!(
+                "✅ Successfully registered {} Discord slash commands.",
+                cmds.len()
+            ),
+            Err(e) => error!("❌ Failed registering Discord slash commands: {}", e),
+        }
     }
 
     async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
@@ -445,7 +477,6 @@ async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> boo
                 let _ = msg.delete(&ctx.http).await;
                 let author_id = msg.author.id.get();
 
-                // Courteous false-positive notification to user (NASA Rule 5)
                 tokio::spawn({
                     let http = ctx.http.clone();
                     async move {
@@ -687,6 +718,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
         "test-pfp" => cmd_test_pfp(ctx, c, &cmd).await,
         "whitelist-user" => cmd_whitelist_user(ctx, c, &cmd).await,
         "whitelist-pfp" => cmd_whitelist_pfp(ctx, c, &cmd).await,
+        "whitelist-image" => cmd_whitelist_image(ctx, c, &cmd).await,
         "notify-user" => cmd_notify_user(ctx, c, &cmd).await,
         "db-stats" => cmd_db_stats(ctx, c, &cmd).await,
         plugin_cmd => {
@@ -869,7 +901,6 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
                 resp.processing_time
             );
 
-            // Dispatch tangible diagnostic proof directly to Sovereign Owner's DM
             send_owner_diagnostic(
                 &ctx.http,
                 &c.config,
@@ -938,7 +969,6 @@ async fn cmd_whitelist_user(ctx: &Context, c: &BotContainer, cmd: &CommandIntera
     c.whitelist.add_user(&target_name).await;
     c.whitelist.add_user(&target_id.to_string()).await;
 
-    // Dispatch proof to Owner DM
     send_owner_diagnostic(
         &ctx.http,
         &c.config,
@@ -1007,7 +1037,6 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
             guard.retain(|&banned| (banned ^ payload.dhash).count_ones() > 6);
         }
 
-        // Notify member that their avatar was verified safe
         let notified = send_user_notification(
             &ctx.http,
             target_id,
@@ -1015,7 +1044,6 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
             "Your profile picture has been reviewed by server staff and marked **Verified Safe**. Your permissions are fully restored!",
         ).await;
 
-        // Dispatch proof directly to Sovereign Owner's DM
         send_owner_diagnostic(
             &ctx.http,
             &c.config,
@@ -1050,6 +1078,124 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
                     .ephemeral(true),
             ),
         )
+        .await;
+}
+
+async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let _ = cmd.defer(&ctx.http).await;
+
+    let mut raw_input = String::new();
+    let mut attachment_url = None;
+    let mut label = "Discord Whitelist".to_string();
+
+    for opt in &cmd.data.options {
+        if opt.name == "input" {
+            if let CommandDataOptionValue::String(s) = &opt.value {
+                raw_input = s.trim().to_string();
+            }
+        } else if opt.name == "file" {
+            if let CommandDataOptionValue::Attachment(att_id) = &opt.value {
+                attachment_url = cmd
+                    .data
+                    .resolved
+                    .attachments
+                    .get(att_id)
+                    .map(|a| a.url.clone());
+            }
+        } else if opt.name == "label" {
+            if let CommandDataOptionValue::String(l) = &opt.value {
+                label = l.clone();
+            }
+        }
+    }
+
+    if raw_input.len() == 64 && raw_input.chars().all(|c| c.is_ascii_hexdigit()) {
+        let sha_clean = raw_input.to_lowercase();
+        let _ =
+            c.db.add_whitelisted_image(&sha_clean, 0, &label, &cmd.user.name)
+                .await;
+        let _ = c.db.revoke_blacklisted_image(&sha_clean).await;
+        c.whitelist.add_image(&sha_clean, 0).await;
+
+        send_owner_diagnostic(
+            &ctx.http,
+            &c.config,
+            "Direct SHA-256 Whitelisted",
+            &format!(
+                "**SHA-256:** `{}`\n**Staff:** {}\n**Label:** `{}`",
+                sha_clean, cmd.user.name, label
+            ),
+        )
+        .await;
+
+        let reply = format!(
+            "✅ **Image Whitelisted via SHA-256 Hash:**\n> **SHA-256:** `{}`\n> **Label:** `{}`\n*Blacklist revoked and safe signature memorized.*",
+            sha_clean, label
+        );
+        let _ = cmd
+            .edit_response(&ctx.http, EditInteractionResponse::new().content(reply))
+            .await;
+        return;
+    }
+
+    let target_url = attachment_url.or_else(|| {
+        if raw_input.starts_with("http://") || raw_input.starts_with("https://") {
+            Some(raw_input)
+        } else {
+            None
+        }
+    });
+
+    let Some(url) = target_url else {
+        let _ = cmd
+            .edit_response(
+                &ctx.http,
+                EditInteractionResponse::new().content(
+                    "❌ Provide a valid image URL, attachment, or 64-character SHA-256 hash.",
+                ),
+            )
+            .await;
+        return;
+    };
+
+    let Ok(payload) = c.media_inspector.inspect_url(&url).await else {
+        let _ = cmd
+            .edit_response(
+                &ctx.http,
+                EditInteractionResponse::new().content("❌ Failed downloading image from source."),
+            )
+            .await;
+        return;
+    };
+
+    let _ =
+        c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
+            .await;
+    let _ = c.db.revoke_blacklisted_image(&payload.sha256).await;
+    c.whitelist.add_image(&payload.sha256, payload.dhash).await;
+
+    if payload.dhash != 0 {
+        let mut guard = c.blacklisted_dhashes.write().await;
+        guard.retain(|&banned| (banned ^ payload.dhash).count_ones() > 6);
+    }
+
+    send_owner_diagnostic(
+        &ctx.http,
+        &c.config,
+        "Image Whitelisted",
+        &format!(
+            "**Staff:** {}\n**SHA-256:** `{}`\n**dHash:** `{:016x}`\n**Label:** `{}`",
+            cmd.user.name, payload.sha256, payload.dhash, label
+        ),
+    )
+    .await;
+
+    let reply = format!(
+        "✅ **Image Whitelisted:**\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n> **Label:** `{}`\n*Perceptual signature memorized. All matching variations are now verified safe.*",
+        payload.sha256, payload.dhash, label
+    );
+    let _ = cmd
+        .edit_response(&ctx.http, EditInteractionResponse::new().content(reply))
         .await;
 }
 
@@ -1091,7 +1237,6 @@ async fn cmd_notify_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteracti
     )
     .await;
 
-    // Send proof to Owner DM
     send_owner_diagnostic(
         &ctx.http,
         &c.config,
