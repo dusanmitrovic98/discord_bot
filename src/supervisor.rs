@@ -1,11 +1,17 @@
+//! # Linux Sealed Memory Process Supervisor & Watchdog
+//!
+//! Executes child cores in anonymous RAM using Linux `memfd_create`.
+//! Bridges child stdout and stderr into the supervisor's telemetry buffer.
+
 use std::ffi::CString;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
+use crate::telemetry::LogBuffer;
 use crate::{AegisError, Result};
 
 pub struct MemoryExecutable {
@@ -56,14 +62,15 @@ impl MemoryExecutable {
         Ok(Self { fd: -1 })
     }
 
+    /// Spawns the child core with piped stdout and stderr to capture telemetry
     pub fn spawn_child(&self) -> Result<Child> {
         #[cfg(target_os = "linux")]
         {
             let proc_path = format!("/proc/self/fd/{}", self.fd);
             Command::new(proc_path)
                 .env("AEGIS_CHILD_MODE", "1")
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| AegisError::SupervisorError(format!("Failed executing memfd: {}", e)))
         }
@@ -79,19 +86,39 @@ impl MemoryExecutable {
 pub struct SupervisorWatchdog {
     current_child: Option<Child>,
     lkg_blob: Option<Vec<u8>>,
-}
-
-impl Default for SupervisorWatchdog {
-    fn default() -> Self {
-        Self::new()
-    }
+    log_buffer: LogBuffer,
 }
 
 impl SupervisorWatchdog {
-    pub fn new() -> Self {
+    pub fn new(log_buffer: LogBuffer) -> Self {
         Self {
             current_child: None,
             lkg_blob: None,
+            log_buffer,
+        }
+    }
+
+    fn attach_child_pipes(child: &mut Child, log_buffer: LogBuffer) {
+        if let Some(stdout) = child.stdout.take() {
+            let buf = log_buffer.clone();
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().flatten() {
+                    println!("{}", line);
+                    buf.push_raw_line(&line);
+                }
+            });
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            let buf = log_buffer;
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().flatten() {
+                    eprintln!("{}", line);
+                    buf.push_raw_line(&line);
+                }
+            });
         }
     }
 
@@ -121,13 +148,14 @@ impl SupervisorWatchdog {
         })?;
 
         let fallback = MemoryExecutable::create_sealed("aegis_core_lkg", lkg)?;
-        self.current_child = Some(fallback.spawn_child()?);
+        let mut child = fallback.spawn_child()?;
+        Self::attach_child_pipes(&mut child, self.log_buffer.clone());
+        self.current_child = Some(child);
         Err(AegisError::SupervisorError(
             "New version crashed; rolled back to LKG".into(),
         ))
     }
 
-    /// Cooperative SIGTERM Graceful Shutdown with SIGKILL fallback (NASA Rule 7)
     fn reap_child_gracefully(mut old_child: Child) {
         let pid = old_child.id() as i32;
         info!("Sending SIGTERM to previous core process (PID: {})...", pid);
@@ -137,7 +165,6 @@ impl SupervisorWatchdog {
             let _ = libc::kill(pid, libc::SIGTERM);
         }
 
-        // Grant 3 seconds for clean DB flush and WebSocket closure
         let start = Instant::now();
         let timeout = Duration::from_secs(3);
         let mut exited = false;
@@ -167,6 +194,9 @@ impl SupervisorWatchdog {
 
         let mem_exec = MemoryExecutable::create_sealed("aegis_core_swapped", &new_binary)?;
         let mut new_child = mem_exec.spawn_child()?;
+
+        // Immediately attach pipes so all startup logs are captured in RAM!
+        Self::attach_child_pipes(&mut new_child, self.log_buffer.clone());
 
         if !Self::probe_child_health(&mut new_child, Duration::from_secs(5)) {
             return self.rollback_to_lkg();
