@@ -1,4 +1,3 @@
-cat << 'EOF' > Cargo.toml
 [package]
 name = "discord-bot"
 version = "0.1.0"
@@ -79,4 +78,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-EOF
