@@ -103,7 +103,8 @@ impl SupervisorWatchdog {
             let buf = log_buffer.clone();
             std::thread::spawn(move || {
                 let reader = BufReader::new(stdout);
-                for line in reader.lines().flatten() {
+                // Invariant: breaks loop cleanly on broken pipe or EOF without namespace shadowing
+                for line in reader.lines().map_while(|res| res.ok()) {
                     println!("{}", line);
                     buf.push_raw_line(&line);
                 }
@@ -114,7 +115,8 @@ impl SupervisorWatchdog {
             let buf = log_buffer;
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
-                for line in reader.lines().flatten() {
+                // Invariant: breaks loop cleanly on broken pipe or EOF without namespace shadowing
+                for line in reader.lines().map_while(|res| res.ok()) {
                     eprintln!("{}", line);
                     buf.push_raw_line(&line);
                 }
@@ -195,7 +197,7 @@ impl SupervisorWatchdog {
         let mem_exec = MemoryExecutable::create_sealed("aegis_core_swapped", &new_binary)?;
         let mut new_child = mem_exec.spawn_child()?;
 
-        // Immediately attach pipes so all startup logs are captured in RAM!
+        // Immediately attach pipes with guaranteed termination on exit
         Self::attach_child_pipes(&mut new_child, self.log_buffer.clone());
 
         if !Self::probe_child_health(&mut new_child, Duration::from_secs(5)) {
