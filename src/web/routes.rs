@@ -1,7 +1,12 @@
+//! # Web Console HTTP Route Handlers
+
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
+    response::{Html, IntoResponse, Response},
     Json,
 };
 use base64::Engine;
@@ -18,19 +23,12 @@ use crate::web::auth::{
 };
 use crate::web::AppState;
 
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-
 const FALLBACK_DASHBOARD_HTML: &str = include_str!("../dashboard.html");
 
-/// Serves the dashboard HTML.
-/// Auto-sanitizes commit hashes from Gist URLs, forces cache-busting,
-/// and sets `Cache-Control: no-store` so browser refreshes are always instantaneous.
 pub async fn serve_dashboard() -> Response {
     if let Ok(gist_url) = std::env::var("DASHBOARD_GIST_URL") {
         let mut clean_url = gist_url.trim().to_string();
 
-        // Auto-strip any 40-character commit hash from the Gist URL path
-        // Transforms: /raw/3a98c74.../dashboard.html -> /raw/dashboard.html
         if let Some(raw_idx) = clean_url.find("/raw/") {
             let after_raw = &clean_url[raw_idx + 5..];
             if let Some(slash_idx) = after_raw.find('/') {
@@ -101,6 +99,12 @@ pub async fn handle_update(State(state): State<AppState>) -> &'static str {
     "Core swap signal accepted\n"
 }
 
+pub async fn get_live_logs(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::telemetry::LiveLogEntry>> {
+    Json(state.log_buffer.get_entries())
+}
+
 // =============================================================================
 // AUTHENTICATION & RBAC
 // =============================================================================
@@ -145,7 +149,7 @@ pub async fn auth_submit(
             created_at: mongodb::bson::DateTime::now(),
         };
         let _ = state.db.create_admin_user(admin).await;
-        info!("👑 Master Admin initialized: {}", payload.username);
+        info!("Master Admin initialized: {}", payload.username);
         return create_signed_session_cookie(&payload.username, &state.session_secret);
     }
 
@@ -162,7 +166,7 @@ pub async fn auth_logout() -> Response {
 }
 
 // =============================================================================
-// THREAT STUDIO (DYNAMIC REGEXES)
+// THREAT RULES
 // =============================================================================
 
 #[derive(Deserialize)]
@@ -210,7 +214,7 @@ pub async fn delete_rule(State(state): State<AppState>, Query(q): Query<QueryPat
 }
 
 // =============================================================================
-// WHITELIST STUDIO (USERS & IMAGES)
+// WHITELISTS
 // =============================================================================
 
 #[derive(Deserialize)]
@@ -276,19 +280,44 @@ pub async fn add_whitelisted_image(
     State(state): State<AppState>,
     Json(payload): Json<AddWlImagePayload>,
 ) -> Response {
-    let client = reqwest::Client::new();
-    if let Ok(resp) = client.get(&payload.url).send().await {
-        if let Ok(bytes) = resp.bytes().await {
-            let sha256 = CryptoEngine::sha256(&bytes);
-            let dhash = CryptoEngine::compute_dhash(&bytes).unwrap_or(0);
-            let _ = state
-                .db
-                .add_whitelisted_image(&sha256, dhash, &payload.label, "Console")
-                .await;
-            return StatusCode::CREATED.into_response();
+    let target = payload.url.trim();
+
+    if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+        let sha_clean = target.to_lowercase();
+        let _ = state
+            .db
+            .add_whitelisted_image(&sha_clean, 0, &payload.label, "Console")
+            .await;
+        let _ = state.db.revoke_blacklisted_image(&sha_clean).await;
+        return StatusCode::CREATED.into_response();
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    if let Ok(resp) = client.get(target).send().await {
+        if resp.status().is_success() {
+            if let Ok(bytes) = resp.bytes().await {
+                let sha256 = CryptoEngine::sha256(&bytes);
+                let dhash = CryptoEngine::compute_dhash(&bytes).unwrap_or(0);
+                let _ = state
+                    .db
+                    .add_whitelisted_image(&sha256, dhash, &payload.label, "Console")
+                    .await;
+                let _ = state.db.revoke_blacklisted_image(&sha256).await;
+                return StatusCode::CREATED.into_response();
+            }
         }
     }
-    (StatusCode::BAD_REQUEST, "Failed fetching image").into_response()
+
+    (
+        StatusCode::BAD_REQUEST,
+        "Failed fetching image from URL or invalid SHA-256 hash",
+    )
+        .into_response()
 }
 
 pub async fn delete_whitelisted_image(
@@ -300,7 +329,7 @@ pub async fn delete_whitelisted_image(
 }
 
 // =============================================================================
-// IMAGE BLACKLIST (LOGO ANNIHILATOR - SHA256 & dHash)
+// BLACKLISTED MEDIA
 // =============================================================================
 
 #[derive(Deserialize)]
@@ -326,16 +355,33 @@ pub async fn blacklist_image(
     State(state): State<AppState>,
     Json(payload): Json<BlacklistImagePayload>,
 ) -> Response {
-    let client = reqwest::Client::new();
-    if let Ok(resp) = client.get(&payload.url).send().await {
-        if let Ok(bytes) = resp.bytes().await {
-            let sha256 = CryptoEngine::sha256(&bytes);
-            let dhash = CryptoEngine::compute_dhash(&bytes).unwrap_or(0);
-            let _ = state
-                .db
-                .blacklist_image_explicit(&sha256, dhash, &payload.label, "Console")
-                .await;
-            return StatusCode::CREATED.into_response();
+    let target = payload.url.trim();
+
+    if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+        let _ = state
+            .db
+            .blacklist_image_explicit(target, 0, &payload.label, "Console")
+            .await;
+        return StatusCode::CREATED.into_response();
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    if let Ok(resp) = client.get(target).send().await {
+        if resp.status().is_success() {
+            if let Ok(bytes) = resp.bytes().await {
+                let sha256 = CryptoEngine::sha256(&bytes);
+                let dhash = CryptoEngine::compute_dhash(&bytes).unwrap_or(0);
+                let _ = state
+                    .db
+                    .blacklist_image_explicit(&sha256, dhash, &payload.label, "Console")
+                    .await;
+                return StatusCode::CREATED.into_response();
+            }
         }
     }
     (StatusCode::BAD_REQUEST, "Failed fetching image from URL").into_response()
@@ -346,14 +392,8 @@ pub async fn revoke_image(State(state): State<AppState>, Query(q): Query<QuerySh
     StatusCode::OK.into_response()
 }
 
-pub async fn get_live_logs(
-    State(state): State<AppState>,
-) -> Json<Vec<crate::telemetry::LiveLogEntry>> {
-    Json(state.log_buffer.get_entries())
-}
-
 // =============================================================================
-// COMMUNITY PLUGINS MANAGER & WEBHOOK MULTIPLEXER
+// WASM PLUGINS
 // =============================================================================
 
 #[derive(Deserialize)]
@@ -366,6 +406,12 @@ pub struct UploadPluginPayload {
 pub struct TogglePluginPayload {
     pub name: String,
     pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ApproveQuotaPayload {
+    pub name: String,
+    pub approved_storage_bytes: u64,
 }
 
 #[derive(Deserialize)]
@@ -447,10 +493,7 @@ pub async fn upload_community_plugin(
             .into_response();
     }
 
-    info!(
-        "Community plugin '{}' installed and verified.",
-        payload.name
-    );
+    info!("WASM Plugin '{}' installed and registered.", payload.name);
     (StatusCode::CREATED, "Plugin installed").into_response()
 }
 
@@ -473,7 +516,6 @@ pub async fn delete_community_plugin(
     StatusCode::OK.into_response()
 }
 
-/// Wildcard HTTP Webhook Multiplexer: Dispatches `/api/plugins/:plugin_id/*path` to the WASM guest
 pub async fn handle_plugin_http(
     State(state): State<AppState>,
     Path((plugin_id, path)): Path<(String, String)>,
@@ -511,7 +553,7 @@ pub async fn handle_plugin_http(
 }
 
 // =============================================================================
-// AUDITS & USERS
+// AUDITS & OPERATORS
 // =============================================================================
 
 pub async fn list_audits(State(state): State<AppState>) -> Json<Vec<crate::db::AuditLogEntry>> {

@@ -1,7 +1,7 @@
 //! # In-Memory Real-Time Telemetry & Log Buffer
 //!
 //! Provides a thread-safe circular ring buffer (max 500 lines) capturing live
-//! application logs from both the supervisor and the piped child bot core.
+//! application logs from both the supervisor and child core, with ANSI escape stripping.
 
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -46,22 +46,42 @@ impl LogBuffer {
         guard.push_back(entry);
     }
 
-    /// Parses raw stdout lines from the child core process and ingests them into the live buffer
+    /// Strips ANSI escape sequences (e.g. [2m, [0m, [32m) from terminal streams
+    fn strip_ansi(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut in_escape = false;
+        for c in input.chars() {
+            if c == '\x1B' {
+                in_escape = true;
+            } else if in_escape {
+                if c == 'm' || c == 'K' || c == 'H' || c == 'J' {
+                    in_escape = false;
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Ingests raw stdout lines from child core process, strips ANSI codes, and extracts metadata
     pub fn push_raw_line(&self, raw: &str) {
+        let clean = Self::strip_ansi(raw);
         let now = chrono::Utc::now().to_rfc3339();
+
         let mut level = "INFO";
-        if raw.contains("ERROR") {
+        if clean.contains("ERROR") {
             level = "ERROR";
-        } else if raw.contains("WARN") {
+        } else if clean.contains("WARN") {
             level = "WARN";
-        } else if raw.contains("DEBUG") {
+        } else if clean.contains("DEBUG") {
             level = "DEBUG";
         }
 
         let mut target = "bot_core";
-        if let Some(start) = raw.find("aegis_bastion::") {
-            if let Some(end) = raw[start..].find(':') {
-                target = &raw[start..start + end];
+        if let Some(start) = clean.find("aegis_bastion::") {
+            if let Some(end) = clean[start..].find(':') {
+                target = &clean[start..start + end];
             }
         }
 
@@ -69,7 +89,7 @@ impl LogBuffer {
             timestamp: now,
             level: level.to_string(),
             target: target.to_string(),
-            message: raw.to_string(),
+            message: clean,
         });
     }
 }
@@ -111,11 +131,12 @@ impl<S: Subscriber> Layer<S> for LogBuffer {
         };
 
         let now = chrono::Utc::now().to_rfc3339();
+        let clean_msg = LogBuffer::strip_ansi(&visitor.0);
         self.push(LiveLogEntry {
             timestamp: now,
             level: level_str.to_string(),
             target: metadata.target().to_string(),
-            message: visitor.0,
+            message: clean_msg,
         });
     }
 }
