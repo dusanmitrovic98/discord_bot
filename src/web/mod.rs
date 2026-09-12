@@ -1,13 +1,15 @@
+//! # Web Console HTTP Router & State Configuration
+
 pub mod auth;
 pub mod routes;
 
-use crate::telemetry::LogBuffer;
 use axum::routing::{any, delete, get, post};
 use axum::Router;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
 use crate::db::DatabaseEngine;
+use crate::telemetry::LogBuffer;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -19,7 +21,7 @@ pub struct AppState {
 
 pub fn build_web_router(state: AppState) -> Router {
     Router::new()
-        // Camouflage & Health
+        // Core & Dashboard
         .route("/", get(routes::health_check))
         .route("/health", get(routes::health_check))
         .route("/dashboard", get(routes::serve_dashboard))
@@ -27,17 +29,19 @@ pub fn build_web_router(state: AppState) -> Router {
             "/update",
             get(routes::handle_update).post(routes::handle_update),
         )
+        .route("/api/logs", get(routes::get_live_logs))
         // Authentication & RBAC
         .route("/api/auth/status", get(routes::auth_status))
         .route("/api/auth/submit", post(routes::auth_submit))
         .route("/api/auth/logout", post(routes::auth_logout))
-        // Dynamic Threat Studio (Regexes)
+        // Threat Rules
         .route(
             "/api/rules",
             get(routes::list_rules)
                 .post(routes::add_rule)
                 .delete(routes::delete_rule),
         )
+        // Whitelists
         .route(
             "/api/whitelist/users",
             get(routes::list_whitelisted_users)
@@ -50,13 +54,13 @@ pub fn build_web_router(state: AppState) -> Router {
                 .post(routes::add_whitelisted_image)
                 .delete(routes::delete_whitelisted_image),
         )
-        // Image Blacklist (Logo Annihilator)
+        // Blacklisted Media
         .route(
             "/api/images",
             get(routes::list_images).delete(routes::revoke_image),
         )
         .route("/api/images/blacklist", post(routes::blacklist_image))
-        // Community WASM Plugins Manager & Webhook Multiplexer
+        // WASM Plugins
         .route("/api/plugins/list", get(routes::list_community_plugins))
         .route("/api/plugins/upload", post(routes::upload_community_plugin))
         .route("/api/plugins/toggle", post(routes::toggle_community_plugin))
@@ -68,7 +72,7 @@ pub fn build_web_router(state: AppState) -> Router {
             "/api/plugins/:plugin_id/*path",
             any(routes::handle_plugin_http),
         )
-        // Audits & Moderators
+        // Audits & Operators
         .route("/api/audits", get(routes::list_audits))
         .route(
             "/api/users",

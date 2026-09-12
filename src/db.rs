@@ -1,7 +1,4 @@
 //! # Database Engine & MongoDB Atlas Storage Layer
-//!
-//! Manages persistence for system blobs, dynamic regexes, dual-layer whitelists,
-//! blacklists, audit logs, and sandboxed WASM plugin storage.
 
 use crate::{AegisError, Result};
 use mongodb::{
@@ -237,7 +234,6 @@ impl DatabaseEngine {
         Ok(users)
     }
 
-    /// Stores dhash as hex string to prevent BSON u64 overflow crashes
     pub async fn add_whitelisted_image(
         &self,
         sha256: &str,
@@ -258,15 +254,15 @@ impl DatabaseEngine {
             String::new()
         };
 
-        let wl_coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
+        let wl_coll: Collection<Document> = self.db.collection("whitelisted_images");
         wl_coll.delete_many(doc! { "sha256": sha256 }).await?;
         wl_coll
-            .insert_one(WhitelistedImage {
-                sha256: sha256.to_string(),
-                dhash: dhash_str,
-                label: label.to_string(),
-                added_by: added_by.to_string(),
-                created_at: BsonDateTime::now(),
+            .insert_one(doc! {
+                "sha256": sha256,
+                "dhash": dhash_str,
+                "label": label,
+                "added_by": added_by,
+                "created_at": BsonDateTime::now()
             })
             .await?;
         Ok(())
@@ -278,12 +274,45 @@ impl DatabaseEngine {
         Ok(())
     }
 
+    /// Defensive BSON deserialization that gracefully handles any legacy format without failing
     pub async fn fetch_whitelisted_images(&self) -> Result<Vec<WhitelistedImage>> {
-        let coll: Collection<WhitelistedImage> = self.db.collection("whitelisted_images");
+        let coll: Collection<Document> = self.db.collection("whitelisted_images");
         let mut cursor = coll.find(doc! {}).await?;
         let mut images = Vec::new();
+
         while cursor.advance().await? {
-            images.push(cursor.deserialize_current()?);
+            let doc = cursor.deserialize_current()?;
+            let sha256 = doc.get_str("sha256").unwrap_or("").to_string();
+            let label = doc
+                .get_str("label")
+                .unwrap_or("Whitelisted Media")
+                .to_string();
+            let added_by = doc.get_str("added_by").unwrap_or("Console").to_string();
+            let created_at = match doc.get_datetime("created_at") {
+                Ok(&dt) => dt,
+                Err(_) => BsonDateTime::now(),
+            };
+
+            // Support both hex string and legacy integer representations seamlessly
+            let dhash = if let Ok(s) = doc.get_str("dhash") {
+                s.to_string()
+            } else if let Ok(i) = doc.get_i64("dhash") {
+                if i != 0 {
+                    format!("{:016x}", i as u64)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            images.push(WhitelistedImage {
+                sha256,
+                dhash,
+                label,
+                added_by,
+                created_at,
+            });
         }
         Ok(images)
     }
