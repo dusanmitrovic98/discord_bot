@@ -39,20 +39,28 @@ async fn main() {
     .expect("Fatal: BotContainer bootstrap failed");
 
     // =========================================================================
-    // BACKGROUND DYNAMIC SYNCHRONIZER (Change-detection enabled: ZERO spam!)
+    // BACKGROUND DYNAMIC SYNCHRONIZER (Dynamic Ban vs Delete Action Parity)
     // =========================================================================
     let sync_c = container.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
 
-            // 1. Sync Dynamic Regexes
+            // 1. Sync Dynamic Regexes (Separates Instant Ban from Delete rules!)
             if let Ok(rules) = sync_c.db.fetch_dynamic_rules().await {
-                let patterns: Vec<String> = rules.into_iter().map(|r| r.pattern).collect();
-                let _ = sync_c.gatekeeper.reload_dynamic_patterns(&patterns);
+                let mut ban_patterns = Vec::new();
+                let mut delete_patterns = Vec::new();
+                for r in rules {
+                    if r.action.to_lowercase() == "ban" {
+                        ban_patterns.push(r.pattern);
+                    } else {
+                        delete_patterns.push(r.pattern);
+                    }
+                }
+                let _ = sync_c.gatekeeper.reload_dynamic_rules(&ban_patterns, &delete_patterns);
             }
 
-            // 2. Sync Whitelist (Silent)
+            // 2. Sync Whitelist
             let _ = sync_c.whitelist.sync_from_db(&sync_c.db).await;
 
             // 3. Sync Blacklisted dHashes
@@ -61,7 +69,7 @@ async fn main() {
                 *guard = dhashes;
             }
 
-            // 4. Sync WASM Plugins with Change-Detection (Zero redundant reloads!)
+            // 4. Sync WASM Plugins with Change-Detection
             if let Ok(records) = sync_c.db.fetch_all_plugin_records().await {
                 let active_names: Vec<String> = records
                     .iter()
@@ -71,21 +79,14 @@ async fn main() {
 
                 for p in records {
                     if p.enabled {
-                        // Only hot-swap if bytecode has ACTUALLY changed!
-                        if !sync_c
-                            .plugin_engine
-                            .is_bytecode_identical(&p.name, &p.bytecode.bytes)
-                        {
-                            let _ = sync_c
-                                .plugin_engine
-                                .hot_swap_plugin(&p.name, &p.bytecode.bytes);
+                        if !sync_c.plugin_engine.is_bytecode_identical(&p.name, &p.bytecode.bytes) {
+                            let _ = sync_c.plugin_engine.hot_swap_plugin(&p.name, &p.bytecode.bytes);
                         }
                     } else {
                         sync_c.plugin_engine.unload_plugin(&p.name);
                     }
                 }
 
-                // Evict deleted plugins from RAM
                 let loaded = sync_c.plugin_engine.get_all_manifests();
                 for m in loaded {
                     if !active_names.contains(&m.name) {

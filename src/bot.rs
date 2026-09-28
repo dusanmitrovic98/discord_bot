@@ -3,12 +3,13 @@
 use serenity::async_trait;
 use serenity::builder::{
     CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, EditMember,
 };
 use serenity::model::application::{
     CommandDataOptionValue, CommandInteraction, CommandOptionType, Interaction,
 };
 use serenity::model::channel::{Message, Reaction};
+use serenity::model::event::GuildMemberUpdateEvent;
 use serenity::model::gateway::Ready;
 use serenity::model::guild::{Guild, Member};
 use serenity::model::id::{ChannelId, GuildId, UserId};
@@ -53,8 +54,16 @@ impl BotContainer {
     ) -> Result<Arc<Self>> {
         let gatekeeper = Arc::new(TextGatekeeper::new());
         if let Ok(rules) = db.fetch_dynamic_rules().await {
-            let patterns: Vec<String> = rules.into_iter().map(|r| r.pattern).collect();
-            let _ = gatekeeper.reload_dynamic_patterns(&patterns);
+            let mut ban_patterns = Vec::new();
+            let mut delete_patterns = Vec::new();
+            for r in rules {
+                if r.action.to_lowercase() == "ban" {
+                    ban_patterns.push(r.pattern);
+                } else {
+                    delete_patterns.push(r.pattern);
+                }
+            }
+            let _ = gatekeeper.reload_dynamic_rules(&ban_patterns, &delete_patterns);
         }
 
         let whitelist = Arc::new(WhitelistRegistry::new());
@@ -146,20 +155,12 @@ impl EventHandler for Handler {
             CreateCommand::new("whitelist-image")
                 .description("Whitelist an image by URL, upload, or SHA-256")
                 .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "input",
-                        "Image URL or SHA-256 Hash",
-                    )
-                    .required(false),
+                    CreateCommandOption::new(CommandOptionType::String, "input", "Image URL or SHA-256 Hash")
+                        .required(false),
                 )
                 .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::Attachment,
-                        "file",
-                        "Upload image directly",
-                    )
-                    .required(false),
+                    CreateCommandOption::new(CommandOptionType::Attachment, "file", "Upload image directly")
+                        .required(false),
                 )
                 .add_option(
                     CreateCommandOption::new(CommandOptionType::String, "label", "Label")
@@ -218,15 +219,11 @@ impl EventHandler for Handler {
 
         let user_id = member.user.id.get();
 
-        dispatch_plugin_event(
-            &c,
-            "member_join",
-            serde_json::json!({
-                "guild_id": member.guild_id.get(),
-                "user_id": user_id,
-                "username": &member.user.name
-            }),
-        );
+        dispatch_plugin_event(&c, "member_join", serde_json::json!({
+            "guild_id": member.guild_id.get(),
+            "user_id": user_id,
+            "username": &member.user.name
+        }));
 
         let eval = evaluate_member_names(
             &c.gatekeeper,
@@ -279,6 +276,74 @@ impl EventHandler for Handler {
         }
     }
 
+    /// Intercepts post-join nickname and display name changes in real time
+    async fn guild_member_update(
+        &self,
+        ctx: Context,
+        _old_if_available: Option<Member>,
+        new: Option<Member>,
+        event: GuildMemberUpdateEvent,
+    ) {
+        let c = get_container(&ctx).await;
+        if !c.config.is_authorized_guild(event.guild_id.get()) {
+            return;
+        }
+
+        let user_id = event.user.id.get();
+        let nickname = event.nick.as_deref().unwrap_or("");
+        let global_name = event.user.global_name.as_deref().unwrap_or("");
+        let username = &event.user.name;
+
+        let eval = evaluate_member_names(
+            &c.gatekeeper,
+            &c.whitelist,
+            user_id,
+            username,
+            global_name,
+            nickname,
+        )
+        .await;
+
+        match eval.verdict {
+            ThreatVerdict::InstantBan => {
+                execute_ban(
+                    &ctx.http,
+                    event.guild_id,
+                    user_id,
+                    &format!("Name violation on update: {}", eval.offending_name),
+                    1.0,
+                    &c.db,
+                    &c.config,
+                )
+                .await;
+                send_mod_alert(
+                    &ctx,
+                    &c.config,
+                    "User Banned on Name Change",
+                    &format!("Banned <@{}> for offensive name `{}`", user_id, eval.offending_name),
+                    user_id,
+                )
+                .await;
+            }
+            ThreatVerdict::DeleteOnly => {
+                if let Some(ref member) = new {
+                    if member.nick.is_some() {
+                        let _ = event.guild_id.edit_member(&ctx.http, user_id, EditMember::new().nickname("")).await;
+                    }
+                }
+                send_mod_alert(
+                    &ctx,
+                    &c.config,
+                    "Nickname Reset",
+                    &format!("Reset nickname for <@{}> (contained `{}`)", user_id, eval.offending_name),
+                    user_id,
+                )
+                .await;
+            }
+            ThreatVerdict::Safe => {}
+        }
+    }
+
     async fn guild_member_removal(
         &self,
         ctx: Context,
@@ -287,59 +352,48 @@ impl EventHandler for Handler {
         _member_data: Option<Member>,
     ) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "member_leave",
-            serde_json::json!({
-                "guild_id": guild_id.get(),
-                "user_id": user.id.get(),
-                "username": &user.name
-            }),
-        );
+        dispatch_plugin_event(&c, "member_leave", serde_json::json!({
+            "guild_id": guild_id.get(),
+            "user_id": user.id.get(),
+            "username": &user.name
+        }));
     }
 
-    async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+    async fn voice_state_update(
+        &self,
+        ctx: Context,
+        old: Option<VoiceState>,
+        new: VoiceState,
+    ) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "voice_state_update",
-            serde_json::json!({
-                "user_id": new.user_id.get(),
-                "guild_id": new.guild_id.map(|g| g.get()),
-                "channel_id": new.channel_id.map(|c| c.get()),
-                "old_channel_id": old.and_then(|o| o.channel_id.map(|c| c.get())),
-                "self_mute": new.self_mute,
-                "self_deaf": new.self_deaf
-            }),
-        );
+        dispatch_plugin_event(&c, "voice_state_update", serde_json::json!({
+            "user_id": new.user_id.get(),
+            "guild_id": new.guild_id.map(|g| g.get()),
+            "channel_id": new.channel_id.map(|c| c.get()),
+            "old_channel_id": old.and_then(|o| o.channel_id.map(|c| c.get())),
+            "self_mute": new.self_mute,
+            "self_deaf": new.self_deaf
+        }));
     }
 
     async fn reaction_add(&self, ctx: Context, reaction: Reaction) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "reaction_add",
-            serde_json::json!({
-                "user_id": reaction.user_id.map(|u| u.get()),
-                "channel_id": reaction.channel_id.get(),
-                "message_id": reaction.message_id.get(),
-                "emoji": reaction.emoji.as_data()
-            }),
-        );
+        dispatch_plugin_event(&c, "reaction_add", serde_json::json!({
+            "user_id": reaction.user_id.map(|u| u.get()),
+            "channel_id": reaction.channel_id.get(),
+            "message_id": reaction.message_id.get(),
+            "emoji": reaction.emoji.as_data()
+        }));
     }
 
     async fn reaction_remove(&self, ctx: Context, reaction: Reaction) {
         let c = get_container(&ctx).await;
-        dispatch_plugin_event(
-            &c,
-            "reaction_remove",
-            serde_json::json!({
-                "user_id": reaction.user_id.map(|u| u.get()),
-                "channel_id": reaction.channel_id.get(),
-                "message_id": reaction.message_id.get(),
-                "emoji": reaction.emoji.as_data()
-            }),
-        );
+        dispatch_plugin_event(&c, "reaction_remove", serde_json::json!({
+            "user_id": reaction.user_id.map(|u| u.get()),
+            "channel_id": reaction.channel_id.get(),
+            "message_id": reaction.message_id.get(),
+            "emoji": reaction.emoji.as_data()
+        }));
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -351,18 +405,14 @@ impl EventHandler for Handler {
             return;
         }
 
-        dispatch_plugin_event(
-            &c,
-            "message_create",
-            serde_json::json!({
-                "id": msg.id.get(),
-                "channel_id": msg.channel_id.get(),
-                "author_id": msg.author.id.get(),
-                "author_name": &msg.author.name,
-                "content": &msg.content,
-                "is_bot": msg.author.bot
-            }),
-        );
+        dispatch_plugin_event(&c, "message_create", serde_json::json!({
+            "id": msg.id.get(),
+            "channel_id": msg.channel_id.get(),
+            "author_id": msg.author.id.get(),
+            "author_name": &msg.author.name,
+            "content": &msg.content,
+            "is_bot": msg.author.bot
+        }));
 
         if guard_author_names(&ctx, &c, &msg).await {
             return;
@@ -385,8 +435,7 @@ impl EventHandler for Handler {
 
 fn dispatch_plugin_event(c: &BotContainer, event_name: &str, data: serde_json::Value) {
     if c.plugin_engine.has_subscribers_for(event_name) {
-        c.plugin_engine
-            .dispatch_event(event_name, &data.to_string());
+        c.plugin_engine.dispatch_event(event_name, &data.to_string());
     }
 }
 
@@ -445,10 +494,7 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
                 ctx,
                 &c.config,
                 "Message Removed",
-                &format!(
-                    "Removed message from <@{}> for `{}`",
-                    author_id, eval.offending_name
-                ),
+                &format!("Removed message from <@{}> for `{}`", author_id, eval.offending_name),
                 author_id,
             )
             .await;
@@ -461,10 +507,7 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
 async fn guard_author_pfp(ctx: &Context, c: &BotContainer, msg: &Message) -> bool {
     if let Some(avatar_url) = msg.author.avatar_url() {
         if let Ok(payload) = c.media_inspector.inspect_url(&avatar_url).await {
-            if !c
-                .whitelist
-                .is_image_safe(&payload.sha256, payload.dhash)
-                .await
+            if !c.whitelist.is_image_safe(&payload.sha256, payload.dhash).await
                 && c.db
                     .is_image_blacklisted(&payload.sha256)
                     .await
@@ -563,10 +606,7 @@ async fn handle_join_avatar(
                             &ctx_c,
                             &cfg,
                             "Flagged Avatar Detected",
-                            &format!(
-                                "User <@{}> avatar flagged ({:.1}%)",
-                                user_id, resp.confidence.nsfw
-                            ),
+                            &format!("User <@{}> avatar flagged ({:.1}%)", user_id, resp.confidence.nsfw),
                             user_id,
                         )
                         .await;
@@ -662,10 +702,7 @@ async fn inspect_message_media(ctx: &Context, c: &BotContainer, msg: &Message) {
                                     &ctx_c,
                                     &cfg,
                                     "Media Removed",
-                                    &format!(
-                                        "Removed from <@{}> ({:.1}%)",
-                                        author_id, resp.confidence.nsfw
-                                    ),
+                                    &format!("Removed from <@{}> ({:.1}%)", author_id, resp.confidence.nsfw),
                                     author_id,
                                 )
                                 .await;
@@ -723,10 +760,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
             for manifest in c.plugin_engine.get_all_manifests() {
                 if manifest.slash_commands.iter().any(|s| s.name == plugin_cmd) {
                     handled = true;
-                    info!(
-                        "Executing /{} from plugin '{}' for user {}",
-                        plugin_cmd, manifest.name, caller_id
-                    );
+                    info!("Executing /{} from plugin '{}' for user {}", plugin_cmd, manifest.name, caller_id);
                     let opts_json = serde_json::to_string(&cmd.data.options).unwrap_or_default();
                     match c.plugin_engine.execute_slash_command(
                         &manifest.name,
@@ -776,7 +810,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
     }
 }
 
-/// Dispatches all 5 notification templates directly to the Sovereign Owner's private messages
 async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
     let caller_id = cmd.user.id.get();
     if !c.config.is_owner(caller_id) {
@@ -796,7 +829,6 @@ async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     let _ = cmd.defer_ephemeral(&ctx.http).await;
     let owner_id = c.config.owner_user_id;
 
-    // Template 1: PFP Under Review
     send_user_notification(
         &ctx.http,
         owner_id,
@@ -805,7 +837,6 @@ async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     ).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Template 2: PFP Verified Safe
     send_user_notification(
         &ctx.http,
         owner_id,
@@ -814,17 +845,14 @@ async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     ).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Template 3: Manual Staff Notice
     send_user_notification(
         &ctx.http,
         owner_id,
         "[Template 3/5] Notice from Server Staff",
         "This is an official communication from server staff regarding community safety.",
-    )
-    .await;
+    ).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Template 4: Attachment Under Review
     send_user_notification(
         &ctx.http,
         owner_id,
@@ -833,7 +861,6 @@ async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     ).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Template 5: Owner Diagnostic Proof
     send_owner_diagnostic(
         &ctx.http,
         &c.config,
@@ -844,9 +871,7 @@ async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
     let _ = cmd
         .edit_response(
             &ctx.http,
-            EditInteractionResponse::new().content(
-                "All 5 sample notification templates have been sent to your private messages.",
-            ),
+            EditInteractionResponse::new().content("All 5 sample notification templates have been sent to your private messages."),
         )
         .await;
 }
@@ -924,10 +949,7 @@ async fn cmd_test_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction)
         return;
     };
 
-    let is_whitelisted = c
-        .whitelist
-        .is_image_safe(&payload.sha256, payload.dhash)
-        .await;
+    let is_whitelisted = c.whitelist.is_image_safe(&payload.sha256, payload.dhash).await;
     let is_blacklisted =
         c.db.is_image_blacklisted(&payload.sha256)
             .await
@@ -1045,12 +1067,8 @@ async fn cmd_whitelist_user(ctx: &Context, c: &BotContainer, cmd: &CommandIntera
         &ctx.http,
         &c.config,
         "User Whitelisted",
-        &format!(
-            "Target: <@{}> (`{}`)\nStaff: {}\nReason: `{}`",
-            target_id, target_name, cmd.user.name, reason
-        ),
-    )
-    .await;
+        &format!("Target: <@{}> (`{}`)\nStaff: {}\nReason: `{}`", target_id, target_name, cmd.user.name, reason),
+    ).await;
 
     let reply = format!(
         "Whitelisted <@{}> (`{}`) by **{}** (Reason: `{}`).",
@@ -1099,9 +1117,10 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
 
     if let Ok(payload) = c.media_inspector.inspect_url(&url).await {
         let label = format!("PFP: @{}", target_name);
-        let _ =
-            c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
-                .await;
+        let _ = c
+            .db
+            .add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
+            .await;
         c.whitelist.add_image(&payload.sha256, payload.dhash).await;
 
         if payload.dhash != 0 {
@@ -1122,15 +1141,9 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
             "PFP Whitelisted",
             &format!(
                 "Target: <@{}> (`{}`)\nStaff: {}\nSHA-256: `{}`\ndHash: `{:016x}`\nMember DM: {}",
-                target_id,
-                target_name,
-                cmd.user.name,
-                payload.sha256,
-                payload.dhash,
-                if notified { "Delivered" } else { "Closed DMs" }
+                target_id, target_name, cmd.user.name, payload.sha256, payload.dhash, if notified { "Delivered" } else { "Closed DMs" }
             ),
-        )
-        .await;
+        ).await;
 
         let reply = format!(
             "**Avatar Whitelisted:** <@{}>\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\nThis image is marked safe. (Notified: {})",
@@ -1173,12 +1186,7 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
             }
         } else if opt.name == "file" {
             if let CommandDataOptionValue::Attachment(att_id) = &opt.value {
-                attachment_url = cmd
-                    .data
-                    .resolved
-                    .attachments
-                    .get(att_id)
-                    .map(|a| a.url.clone());
+                attachment_url = cmd.data.resolved.attachments.get(att_id).map(|a| a.url.clone());
             }
         } else if opt.name == "label" {
             if let CommandDataOptionValue::String(l) = &opt.value {
@@ -1189,9 +1197,7 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
 
     if raw_input.len() == 64 && raw_input.chars().all(|c| c.is_ascii_hexdigit()) {
         let sha_clean = raw_input.to_lowercase();
-        let _ =
-            c.db.add_whitelisted_image(&sha_clean, 0, &label, &cmd.user.name)
-                .await;
+        let _ = c.db.add_whitelisted_image(&sha_clean, 0, &label, &cmd.user.name).await;
         let _ = c.db.revoke_blacklisted_image(&sha_clean).await;
         c.whitelist.add_image(&sha_clean, 0).await;
 
@@ -1199,20 +1205,14 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
             &ctx.http,
             &c.config,
             "Direct SHA-256 Whitelisted",
-            &format!(
-                "SHA-256: `{}`\nStaff: {}\nLabel: `{}`",
-                sha_clean, cmd.user.name, label
-            ),
-        )
-        .await;
+            &format!("SHA-256: `{}`\nStaff: {}\nLabel: `{}`", sha_clean, cmd.user.name, label),
+        ).await;
 
         let reply = format!(
             "**Image Whitelisted:**\n> **SHA-256:** `{}`\n> **Label:** `{}`\nThis image is marked safe.",
             sha_clean, label
         );
-        let _ = cmd
-            .edit_response(&ctx.http, EditInteractionResponse::new().content(reply))
-            .await;
+        let _ = cmd.edit_response(&ctx.http, EditInteractionResponse::new().content(reply)).await;
         return;
     }
 
@@ -1228,9 +1228,7 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
         let _ = cmd
             .edit_response(
                 &ctx.http,
-                EditInteractionResponse::new().content(
-                    "Provide a valid image URL, attachment, or 64-character SHA-256 hash.",
-                ),
+                EditInteractionResponse::new().content("Provide a valid image URL, attachment, or 64-character SHA-256 hash."),
             )
             .await;
         return;
@@ -1246,9 +1244,7 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
         return;
     };
 
-    let _ =
-        c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
-            .await;
+    let _ = c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name).await;
     let _ = c.db.revoke_blacklisted_image(&payload.sha256).await;
     c.whitelist.add_image(&payload.sha256, payload.dhash).await;
 
@@ -1265,16 +1261,13 @@ async fn cmd_whitelist_image(ctx: &Context, c: &BotContainer, cmd: &CommandInter
             "Staff: {}\nSHA-256: `{}`\ndHash: `{:016x}`\nLabel: `{}`",
             cmd.user.name, payload.sha256, payload.dhash, label
         ),
-    )
-    .await;
+    ).await;
 
     let reply = format!(
         "**Image Whitelisted:**\n> **SHA-256:** `{}`\n> **dHash:** `{:016x}`\n> **Label:** `{}`\nThis image is marked safe.",
         payload.sha256, payload.dhash, label
     );
-    let _ = cmd
-        .edit_response(&ctx.http, EditInteractionResponse::new().content(reply))
-        .await;
+    let _ = cmd.edit_response(&ctx.http, EditInteractionResponse::new().content(reply)).await;
 }
 
 async fn cmd_notify_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
@@ -1312,8 +1305,7 @@ async fn cmd_notify_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteracti
         target_id,
         "Notice from Server Staff",
         &message_text,
-    )
-    .await;
+    ).await;
 
     send_owner_diagnostic(
         &ctx.http,
@@ -1321,30 +1313,21 @@ async fn cmd_notify_user(ctx: &Context, c: &BotContainer, cmd: &CommandInteracti
         "User Notified",
         &format!(
             "Staff: {}\nTarget: <@{}>\nStatus: {}\nMessage: {}",
-            cmd.user.name,
-            target_id,
-            if delivered { "Delivered" } else { "Closed DMs" },
-            message_text
+            cmd.user.name, target_id, if delivered { "Delivered" } else { "Closed DMs" }, message_text
         ),
-    )
-    .await;
+    ).await;
 
     let reply = if delivered {
         format!("Notification delivered to <@{}>.", target_id)
     } else {
-        format!(
-            "Could not send DM to <@{}> (User has DMs closed).",
-            target_id
-        )
+        format!("Could not send DM to <@{}> (User has DMs closed).", target_id)
     };
 
     let _ = cmd
         .create_response(
             &ctx.http,
             CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new()
-                    .content(reply)
-                    .ephemeral(true),
+                CreateInteractionResponseMessage::new().content(reply).ephemeral(true),
             ),
         )
         .await;
@@ -1389,10 +1372,7 @@ pub async fn execute_ban(
     }
     let user = UserId::new(user_id);
     if let Ok(()) = guild_id.ban_with_reason(http, user, 7, reason).await {
-        info!(
-            "Banned user {} from Guild {}. Reason: {}",
-            user_id, guild_id, reason
-        );
+        info!("Banned user {} from Guild {}. Reason: {}", user_id, guild_id, reason);
         let _ = db
             .record_audit(AuditLogEntry {
                 user_id,
