@@ -24,6 +24,7 @@ pub fn build_web_router(state: AppState) -> Router {
         // Core & Dashboard
         .route("/", get(routes::health_check))
         .route("/health", get(routes::health_check))
+        .route("/health/liveness", get(routes::liveness_check))
         .route("/dashboard", get(routes::serve_dashboard))
         .route(
             "/update",

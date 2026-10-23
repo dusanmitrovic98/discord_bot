@@ -1,5 +1,7 @@
 pub mod bot;
+pub mod cluster;
 pub mod config;
+pub mod constants;
 pub mod crypto;
 pub mod db;
 pub mod gatekeeper;
@@ -37,14 +39,20 @@ pub enum AegisError {
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
+    #[error("BSON Deserialization error: {0}")]
+    BsonError(#[from] mongodb::bson::de::Error),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
     #[error("Payload rejected: size exceeds maximum bound of {0} bytes")]
     PayloadTooLarge(usize),
 
-    #[error("Queue saturation / backpressure drop")]
+    #[error("Queue saturated")]
     QueueSaturated,
+
+    #[error("Cluster coordination failure: {0}")]
+    ClusterError(String),
 
     #[error("Regular expression validation failed: {0}")]
     RegexError(#[from] regex::Error),

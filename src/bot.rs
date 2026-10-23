@@ -2,7 +2,7 @@
 
 use serenity::async_trait;
 use serenity::builder::{
-    CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateCommand, CreateCommandOption, CreateEmbed, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, EditMember,
 };
 use serenity::model::application::{
@@ -16,17 +16,21 @@ use serenity::model::id::{ChannelId, GuildId, UserId};
 use serenity::model::user::User;
 use serenity::model::voice::VoiceState;
 use serenity::prelude::*;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::config::GuildConfig;
-use crate::db::{AuditLogEntry, DatabaseEngine};
+use crate::constants::geo::{lookup_country_by_code, AgeBracket};
+use crate::db::{AuditLogEntry, DatabaseEngine, GatedRoom, UserProfile};
 use crate::gatekeeper::{TextGatekeeper, ThreatVerdict};
 use crate::media::{MediaInspector, MediaPayload};
 use crate::pipeline::alerts::{
     send_logs_evidence, send_mod_alert, send_owner_diagnostic, send_user_notification,
 };
+use crate::pipeline::apartments::triage_forum_message;
+use crate::pipeline::leveling::{broadcast_level_up, XpWriteBackBuffer};
 use crate::pipeline::media_guard::{triage_media, MediaVerdict};
 use crate::pipeline::name_guard::evaluate_member_names;
 use crate::pipeline::sweeper::purge_welcome_channel_on_nsfw_join;
@@ -44,6 +48,7 @@ pub struct BotContainer {
     pub scan_queue: Arc<BoundedScanQueue>,
     pub plugin_engine: Arc<DynamicPluginEngine>,
     pub blacklisted_dhashes: Arc<RwLock<Vec<u64>>>,
+    pub xp_buffer: Arc<XpWriteBackBuffer>,
 }
 
 impl BotContainer {
@@ -87,6 +92,8 @@ impl BotContainer {
             }
         }
 
+        let xp_buffer = Arc::new(XpWriteBackBuffer::new());
+
         Ok(Arc::new(Self {
             config,
             gatekeeper,
@@ -96,6 +103,7 @@ impl BotContainer {
             scan_queue,
             plugin_engine,
             blacklisted_dhashes,
+            xp_buffer,
         }))
     }
 }
@@ -110,6 +118,8 @@ pub struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
+        crate::cluster::p2p::IS_GATEWAY_HEALTHY.store(true, Ordering::Relaxed);
+
         let c = get_container(&ctx).await;
         info!(
             "Sebastian The Butler Online. Registering commands for Guild: {}",
@@ -118,6 +128,58 @@ impl EventHandler for Handler {
 
         let guild_id = GuildId::new(c.config.authorized_guild_id);
         let mut commands = vec![
+            CreateCommand::new("profile")
+                .description("View Chill Zone virtual passport")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::User, "user", "Target member")
+                        .required(false),
+                ),
+            CreateCommand::new("profile-edit")
+                .description("Configure country, age group, or bio")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "country", "ISO-2 Country code (e.g. RS, US, DE)")
+                        .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "age", "Age group (18-19, 20-24, 25-29, 30-34, 35-39, 40-44, 45-49, 50+)")
+                        .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "bio", "Custom markdown bio (up to 2000 chars)")
+                        .required(false),
+                ),
+            CreateCommand::new("room-owner-set")
+                .description("Staff: manage room owner or lock status")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Channel, "thread", "Forum thread channel")
+                        .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "action", "Action: assign, clear, lock, unlock")
+                        .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::User, "user", "New owner (if assigning)")
+                        .required(false),
+                ),
+            CreateCommand::new("room-claim")
+                .description("Claim ownership of this forum thread"),
+            CreateCommand::new("room-gate")
+                .description("Set allowed age brackets for this apartment (comma separated)")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "brackets", "e.g. 20-24, 25-29")
+                        .required(true),
+                ),
+            CreateCommand::new("xp-set")
+                .description("Owner: manually adjust user level for parity")
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::User, "user", "Target member")
+                        .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(CommandOptionType::Integer, "level", "Target level (0-100)")
+                        .required(true),
+                ),
             CreateCommand::new("test-name")
                 .description("Evaluate any username against Gatekeeper")
                 .add_option(
@@ -240,21 +302,12 @@ impl EventHandler for Handler {
                 ctx.http.clone(),
                 c.config.clone(),
             ));
-            execute_ban(
-                &ctx.http,
-                member.guild_id,
-                user_id,
-                &format!("Name violation: {}", eval.offending_name),
-                1.0,
-                &c.db,
-                &c.config,
-            )
-            .await;
+            // ADVISORY INVARIANT: Alert moderators with evidence; do not execute automated ban
             send_mod_alert(
                 &ctx,
                 &c.config,
-                "User Banned on Join",
-                &format!("Banned <@{}> for name `{}`", user_id, eval.offending_name),
+                "🚨 Flagged Name Violation on Join",
+                &format!("User <@{}> joined with illicit name `{}`. Human review required.", user_id, eval.offending_name),
                 user_id,
             )
             .await;
@@ -276,7 +329,6 @@ impl EventHandler for Handler {
         }
     }
 
-    /// Intercepts post-join nickname and display name changes in real time
     async fn guild_member_update(
         &self,
         ctx: Context,
@@ -306,21 +358,17 @@ impl EventHandler for Handler {
 
         match eval.verdict {
             ThreatVerdict::InstantBan => {
-                execute_ban(
-                    &ctx.http,
-                    event.guild_id,
-                    user_id,
-                    &format!("Name violation on update: {}", eval.offending_name),
-                    1.0,
-                    &c.db,
-                    &c.config,
-                )
-                .await;
+                // ADVISORY INVARIANT: Reset nickname if possible and alert moderators
+                if let Some(ref member) = new {
+                    if member.nick.is_some() {
+                        let _ = event.guild_id.edit_member(&ctx.http, user_id, EditMember::new().nickname("")).await;
+                    }
+                }
                 send_mod_alert(
                     &ctx,
                     &c.config,
-                    "User Banned on Name Change",
-                    &format!("Banned <@{}> for offensive name `{}`", user_id, eval.offending_name),
+                    "🚨 Name Violation on Update",
+                    &format!("User <@{}> updated name to offensive identifier `{}`. Human review required.", user_id, eval.offending_name),
                     user_id,
                 )
                 .await;
@@ -405,6 +453,12 @@ impl EventHandler for Handler {
             return;
         }
 
+        // 1. FORUM APARTMENTS TRIAGE
+        if triage_forum_message(&ctx, &c, &msg).await {
+            return;
+        }
+
+        // 2. DISPATCH PLUGIN EVENTS
         dispatch_plugin_event(&c, "message_create", serde_json::json!({
             "id": msg.id.get(),
             "channel_id": msg.channel_id.get(),
@@ -414,6 +468,7 @@ impl EventHandler for Handler {
             "is_bot": msg.author.bot
         }));
 
+        // 3. SECURITY GUARDS
         if guard_author_names(&ctx, &c, &msg).await {
             return;
         }
@@ -421,6 +476,15 @@ impl EventHandler for Handler {
             return;
         }
         inspect_message_media(&ctx, &c, &msg).await;
+
+        // 4. NATIVE LEVELING ACCUMULATION
+        if let Some((user_id, current_xp)) = c.xp_buffer.process_chat_message(&msg).await {
+            let xp_64 = current_xp as u64;
+            let target_level = ((xp_64 as f64 / 100.0).sqrt() as u32).min(100);
+            if xp_64 >= XpWriteBackBuffer::xp_for_level(target_level) && target_level > 0 {
+                broadcast_level_up(&ctx, user_id, target_level).await;
+            }
+        }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -466,26 +530,14 @@ async fn guard_author_names(ctx: &Context, c: &BotContainer, msg: &Message) -> b
     match eval.verdict {
         ThreatVerdict::InstantBan => {
             let _ = msg.delete(&ctx.http).await;
-            if let Some(gid) = msg.guild_id {
-                execute_ban(
-                    &ctx.http,
-                    gid,
-                    author_id,
-                    &format!("Name violation: {}", eval.offending_name),
-                    1.0,
-                    &c.db,
-                    &c.config,
-                )
-                .await;
-                send_mod_alert(
-                    ctx,
-                    &c.config,
-                    "User Banned",
-                    &format!("Banned <@{}>", author_id),
-                    author_id,
-                )
-                .await;
-            }
+            send_mod_alert(
+                ctx,
+                &c.config,
+                "🚨 Message Removed (Name Violation)",
+                &format!("Removed message from <@{}> for critical pattern `{}`. Human review advised.", author_id, eval.offending_name),
+                author_id,
+            )
+            .await;
             true
         }
         ThreatVerdict::DeleteOnly => {
@@ -732,21 +784,43 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
         .as_ref()
         .map_or(Vec::new(), |m| m.roles.iter().map(|r| r.get()).collect());
 
-    if !c.config.is_staff(caller_id, &roles) {
-        let _ = cmd
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content("Staff role required.")
-                        .ephemeral(true),
-                ),
-            )
-            .await;
-        return;
-    }
-
     match cmd.data.name.as_str() {
+        "profile" => cmd_profile(ctx, c, &cmd).await,
+        "profile-edit" => cmd_profile_edit(ctx, c, &cmd).await,
+        "room-claim" => cmd_room_claim(ctx, c, &cmd).await,
+        "room-gate" => cmd_room_gate(ctx, c, &cmd).await,
+        "room-owner-set" => {
+            if !c.config.is_staff(caller_id, &roles) {
+                let _ = cmd
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Staff role required.")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+            cmd_room_owner_set(ctx, c, &cmd).await;
+        }
+        "xp-set" => {
+            if !c.config.is_owner(caller_id) {
+                let _ = cmd
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Owner role required.")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+            cmd_xp_set(ctx, c, &cmd).await;
+        }
         "test-name" => cmd_test_name(ctx, c, &cmd).await,
         "test-pfp" => cmd_test_pfp(ctx, c, &cmd).await,
         "test-dms" => cmd_test_dms(ctx, c, &cmd).await,
@@ -768,7 +842,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                         &opts_json,
                     ) {
                         Ok(reply) => {
-                            info!("/{} output: '{}'", plugin_cmd, reply);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -779,7 +852,6 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                                 .await;
                         }
                         Err(e) => {
-                            tracing::error!("Plugin error on /{}: {}", plugin_cmd, e);
                             let _ = cmd
                                 .create_response(
                                     &ctx.http,
@@ -801,13 +873,464 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
                         &ctx.http,
                         CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new()
-                                .content("Command acknowledged."),
+                                .content("Command acknowledged.")
+                                .ephemeral(true),
                         ),
                     )
                     .await;
             }
         }
     }
+}
+
+// =============================================================================
+// COMMAND HANDLERS
+// =============================================================================
+
+async fn cmd_profile(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let mut target_user_id = cmd.user.id.get();
+    let mut target_name = cmd.user.name.clone();
+
+    for opt in &cmd.data.options {
+        if opt.name == "user" {
+            if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_user_id = uid.get();
+                if let Some(u) = cmd.data.resolved.users.get(uid) {
+                    target_name = u.name.clone();
+                }
+            }
+        }
+    }
+
+    let profile = c.db.fetch_user_profile(target_user_id).await.unwrap_or(None);
+
+    let (country, continent, age_group, bio, level, xp, points) = match profile {
+        Some(p) => (
+            p.country_name.unwrap_or_else(|| "Unspecified".into()),
+            p.continent.unwrap_or_else(|| "Unspecified".into()),
+            p.age_bracket.unwrap_or_else(|| "Unspecified".into()),
+            p.custom_bio,
+            p.level,
+            p.xp,
+            p.points,
+        ),
+        None => (
+            "Unspecified".into(),
+            "Unspecified".into(),
+            "Unspecified".into(),
+            "This member has not customized their Chill Zone profile yet.".into(),
+            0,
+            0,
+            0,
+        ),
+    };
+
+    let embed = CreateEmbed::new()
+        .title(format!("Chill Zone Passport // {}", target_name))
+        .field("Continent", continent, true)
+        .field("Country", country, true)
+        .field("Age Group", age_group, true)
+        .field("Server Rank", format!("Level {} ({} XP)", level, xp), true)
+        .field("Cosmetic Points", points.to_string(), true)
+        .description(if bio.is_empty() { "No bio set." } else { &bio })
+        .color(0xe05638)
+        .footer(serenity::builder::CreateEmbedFooter::new(
+            "Use /profile-edit to customize your identity",
+        ));
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().embed(embed),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_profile_edit(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let user_id = cmd.user.id.get();
+    let mut country_code_opt = None;
+    let mut age_opt = None;
+    let mut bio_opt = None;
+
+    for opt in &cmd.data.options {
+        if opt.name == "country" {
+            if let CommandDataOptionValue::String(s) = &opt.value {
+                country_code_opt = Some(s.trim().to_uppercase());
+            }
+        } else if opt.name == "age" {
+            if let CommandDataOptionValue::String(s) = &opt.value {
+                age_opt = Some(s.trim().to_string());
+            }
+        } else if opt.name == "bio" {
+            if let CommandDataOptionValue::String(s) = &opt.value {
+                bio_opt = Some(s.trim().to_string());
+            }
+        }
+    }
+
+    let mut profile = c.db.fetch_user_profile(user_id).await.unwrap_or(None).unwrap_or(UserProfile {
+        user_id,
+        continent: None,
+        country_code: None,
+        country_name: None,
+        age_bracket: None,
+        custom_bio: String::new(),
+        xp: 0,
+        level: 0,
+        points: 0,
+        updated_at: mongodb::bson::DateTime::now(),
+    });
+
+    if let Some(ref code) = country_code_opt {
+        if let Some(entry) = lookup_country_by_code(code) {
+            profile.country_code = Some(entry.code.to_string());
+            profile.country_name = Some(entry.name.to_string());
+            profile.continent = Some(entry.continent.as_str().to_string());
+        } else {
+            let _ = cmd
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Invalid ISO-2 country code. Valid examples: `RS`, `US`, `DE`, `FR`, `JP`.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    }
+
+    if let Some(ref age_str) = age_opt {
+        if let Some(bracket) = AgeBracket::from_str_strict(age_str) {
+            profile.age_bracket = Some(bracket.as_str().to_string());
+        } else {
+            let _ = cmd
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Invalid age group. Valid: `18-19`, `20-24`, `25-29`, `30-34`, `35-39`, `40-44`, `45-49`, `50+`.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    }
+
+    if let Some(bio) = bio_opt {
+        if bio.len() > 2000 {
+            let _ = cmd
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Bio exceeds maximum bound of 2000 characters.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+        profile.custom_bio = bio;
+    }
+
+    profile.updated_at = mongodb::bson::DateTime::now();
+    let _ = c.db.save_user_profile(profile).await;
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("Chill Zone profile updated successfully! View with `/profile`.")
+                    .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_room_claim(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let caller_id = cmd.user.id.get();
+    let channel_id = cmd.channel_id;
+
+    let Ok(channel) = channel_id.to_channel(&ctx.http).await else {
+        return;
+    };
+    let Some(guild_channel) = channel.guild() else {
+        return;
+    };
+
+    if !matches!(
+        guild_channel.kind,
+        serenity::model::channel::ChannelType::PublicThread
+            | serenity::model::channel::ChannelType::PrivateThread
+    ) {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("This command must be invoked inside a forum apartment thread.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let thread_id = channel_id.get();
+    let mut room = c.db.fetch_gated_room(thread_id).await.unwrap_or(None).unwrap_or(GatedRoom {
+        channel_id: thread_id,
+        owner_id: None,
+        allowed_brackets: Vec::new(),
+        is_locked: false,
+        created_at: mongodb::bson::DateTime::now(),
+        updated_at: mongodb::bson::DateTime::now(),
+    });
+
+    if let Some(existing_owner) = room.owner_id {
+        let reply = if existing_owner == caller_id {
+            "You are already the designated owner of this apartment."
+        } else {
+            "This apartment is already owned. Ownership transfers require server staff."
+        };
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new().content(reply).ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    if guild_channel.owner_id != Some(UserId::new(caller_id)) && !c.config.is_owner(caller_id) {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Only the original creator of this thread can claim ownership.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    room.owner_id = Some(caller_id);
+    room.updated_at = mongodb::bson::DateTime::now();
+    let _ = c.db.save_gated_room(room).await;
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!("Ownership bound! <@{}> is now the owner of this apartment.", caller_id)),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_room_gate(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let caller_id = cmd.user.id.get();
+    let channel_id = cmd.channel_id;
+    let mut brackets_str = String::new();
+
+    for opt in &cmd.data.options {
+        if opt.name == "brackets" {
+            if let CommandDataOptionValue::String(s) = &opt.value {
+                brackets_str = s.clone();
+            }
+        }
+    }
+
+    let thread_id = channel_id.get();
+    let mut room = c.db.fetch_gated_room(thread_id).await.unwrap_or(None).unwrap_or(GatedRoom {
+        channel_id: thread_id,
+        owner_id: None,
+        allowed_brackets: Vec::new(),
+        is_locked: false,
+        created_at: mongodb::bson::DateTime::now(),
+        updated_at: mongodb::bson::DateTime::now(),
+    });
+
+    let caller_roles: Vec<u64> = cmd
+        .member
+        .as_ref()
+        .map_or(Vec::new(), |m| m.roles.iter().map(|r| r.get()).collect());
+
+    if room.owner_id != Some(caller_id) && !c.config.is_staff(caller_id, &caller_roles) {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Only the room owner or staff can configure apartment gates.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let parsed_brackets: Vec<String> = brackets_str
+        .split(',')
+        .filter_map(|s| AgeBracket::from_str_strict(s).map(|b| b.as_str().to_string()))
+        .collect();
+
+    if parsed_brackets.is_empty() {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("No valid age brackets parsed. Example: `/room-gate brackets: 20-24, 25-29`.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    room.allowed_brackets = parsed_brackets.clone();
+    room.updated_at = mongodb::bson::DateTime::now();
+    let _ = c.db.save_gated_room(room).await;
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!("Apartment gates updated! Allowed groups: `{}`", parsed_brackets.join(", "))),
+            ),
+        )
+        .await;
+}
+
+async fn cmd_room_owner_set(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let mut target_thread_id = 0u64;
+    let mut target_user_id = None;
+    let mut action = String::new();
+
+    for opt in &cmd.data.options {
+        if opt.name == "thread" {
+            if let CommandDataOptionValue::Channel(cid) = &opt.value {
+                target_thread_id = cid.get();
+            }
+        } else if opt.name == "user" {
+            if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_user_id = Some(uid.get());
+            }
+        } else if opt.name == "action" {
+            if let CommandDataOptionValue::String(s) = &opt.value {
+                action = s.to_lowercase();
+            }
+        }
+    }
+
+    if target_thread_id == 0 {
+        let _ = cmd
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new().content("Thread parameter required.").ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let mut room = c.db.fetch_gated_room(target_thread_id).await.unwrap_or(None).unwrap_or(GatedRoom {
+        channel_id: target_thread_id,
+        owner_id: None,
+        allowed_brackets: Vec::new(),
+        is_locked: false,
+        created_at: mongodb::bson::DateTime::now(),
+        updated_at: mongodb::bson::DateTime::now(),
+    });
+
+    match action.as_str() {
+        "assign" => {
+            room.owner_id = target_user_id;
+            room.updated_at = mongodb::bson::DateTime::now();
+            let _ = c.db.save_gated_room(room).await;
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(format!("Assigned owner of thread <#{}> to <@{}>.", target_thread_id, target_user_id.unwrap_or(0))))).await;
+        }
+        "clear" => {
+            room.owner_id = None;
+            room.updated_at = mongodb::bson::DateTime::now();
+            let _ = c.db.save_gated_room(room).await;
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(format!("Thread <#{}> is now ownerless.", target_thread_id)))).await;
+        }
+        "lock" => {
+            room.is_locked = true;
+            room.updated_at = mongodb::bson::DateTime::now();
+            let _ = c.db.save_gated_room(room).await;
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(format!("Thread <#{}> is now locked to non-staff.", target_thread_id)))).await;
+        }
+        "unlock" => {
+            room.is_locked = false;
+            room.updated_at = mongodb::bson::DateTime::now();
+            let _ = c.db.save_gated_room(room).await;
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(format!("Thread <#{}> unlocked.", target_thread_id)))).await;
+        }
+        _ => {
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("Invalid action: use `assign`, `clear`, `lock`, or `unlock`.").ephemeral(true))).await;
+        }
+    }
+}
+
+async fn cmd_xp_set(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
+    let mut target_id = 0u64;
+    let mut target_level = 0u32;
+
+    for opt in &cmd.data.options {
+        if opt.name == "user" {
+            if let CommandDataOptionValue::User(uid) = &opt.value {
+                target_id = uid.get();
+            }
+        } else if opt.name == "level" {
+            if let CommandDataOptionValue::Integer(lvl) = &opt.value {
+                target_level = (*lvl).clamp(0, 100) as u32;
+            }
+        }
+    }
+
+    let calculated_xp = XpWriteBackBuffer::xp_for_level(target_level);
+    let mut profile = c.db.fetch_user_profile(target_id).await.unwrap_or(None).unwrap_or(UserProfile {
+        user_id: target_id,
+        continent: None,
+        country_code: None,
+        country_name: None,
+        age_bracket: None,
+        custom_bio: String::new(),
+        xp: calculated_xp,
+        level: target_level,
+        points: calculated_xp,
+        updated_at: mongodb::bson::DateTime::now(),
+    });
+
+    profile.level = target_level;
+    profile.xp = calculated_xp;
+    profile.updated_at = mongodb::bson::DateTime::now();
+    let _ = c.db.save_user_profile(profile).await;
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!("Level for <@{}> calibrated to **Level {}** ({} XP).", target_id, target_level, calculated_xp)),
+            ),
+        )
+        .await;
 }
 
 async fn cmd_test_dms(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
@@ -1054,12 +1577,8 @@ async fn cmd_whitelist_user(ctx: &Context, c: &BotContainer, cmd: &CommandIntera
         return;
     }
 
-    let _ =
-        c.db.add_whitelisted_user(&target_name, &cmd.user.name, &reason)
-            .await;
-    let _ =
-        c.db.add_whitelisted_user(&target_id.to_string(), &cmd.user.name, &reason)
-            .await;
+    let _ = c.db.add_whitelisted_user(&target_name, &cmd.user.name, &reason).await;
+    let _ = c.db.add_whitelisted_user(&target_id.to_string(), &cmd.user.name, &reason).await;
     c.whitelist.add_user(&target_name).await;
     c.whitelist.add_user(&target_id.to_string()).await;
 
@@ -1117,10 +1636,7 @@ async fn cmd_whitelist_pfp(ctx: &Context, c: &BotContainer, cmd: &CommandInterac
 
     if let Ok(payload) = c.media_inspector.inspect_url(&url).await {
         let label = format!("PFP: @{}", target_name);
-        let _ = c
-            .db
-            .add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name)
-            .await;
+        let _ = c.db.add_whitelisted_image(&payload.sha256, payload.dhash, &label, &cmd.user.name).await;
         c.whitelist.add_image(&payload.sha256, payload.dhash).await;
 
         if payload.dhash != 0 {

@@ -1,0 +1,85 @@
+   Compiling discord-bot v0.1.0 (/run/media/dusanmitrovic98/TON_618/home/dusanmitrovic98/workstation/01.projects/discord_bot)
+warning: unused import: `Ordering`
+ --> src/cluster/p2p.rs:8:37
+  |
+8 | use std::sync::atomic::{AtomicBool, Ordering};
+  |                                     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `info`
+  --> src/cluster/p2p.rs:11:22
+   |
+11 | use tracing::{error, info, warn};
+   |                      ^^^^
+
+warning: unused imports: `CreateMessage` and `EditThread`
+ --> src/pipeline/apartments.rs:6:25
+  |
+6 | use serenity::builder::{CreateMessage, EditThread};
+  |                         ^^^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `RoleId`
+ --> src/pipeline/apartments.rs:8:38
+  |
+8 | use serenity::model::id::{ChannelId, RoleId};
+  |                                      ^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src/pipeline/apartments.rs:10:5
+   |
+10 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `info`
+  --> src/pipeline/apartments.rs:11:15
+   |
+11 | use tracing::{info, warn};
+   |               ^^^^
+
+warning: unused import: `crate::db::GatedRoom`
+  --> src/pipeline/apartments.rs:15:5
+   |
+15 | use crate::db::GatedRoom;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `mongodb::bson::DateTime as BsonDateTime`
+ --> src/pipeline/leveling.rs:6:5
+  |
+6 | use mongodb::bson::DateTime as BsonDateTime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing::info`
+  --> src/pipeline/leveling.rs:14:5
+   |
+14 | use tracing::info;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `crate::bot::BotContainer`
+  --> src/pipeline/leveling.rs:16:5
+   |
+16 | use crate::bot::BotContainer;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `is_thread` found for struct `GuildChannel` in the current scope
+   --> src/pipeline/apartments.rs:28:23
+    |
+ 28 |     if !guild_channel.is_thread() {
+    |                       ^^^^^^^^^
+    |
+help: there is a method `edit_thread` with a similar name, but with different arguments
+   --> /home/dusanmitrovic98/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serenity-0.12.5/src/model/channel/guild_channel.rs:523:5
+    |
+523 | /     pub async fn edit_thread(
+524 | |         &mut self,
+525 | |         cache_http: impl CacheHttp,
+526 | |         builder: EditThread<'_>,
+527 | |     ) -> Result<()> {
+    | |___________________^
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `discord-bot` (lib) generated 10 warnings
+error: could not compile `discord-bot` (lib) due to 1 previous error; 10 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: `discord-bot` (lib test) generated 10 warnings (10 duplicates)
+error: could not compile `discord-bot` (lib test) due to 1 previous error; 10 warnings emitted

@@ -94,6 +94,15 @@ pub async fn health_check() -> &'static str {
     "OK"
 }
 
+/// Deep Liveness Probe for P2P Cluster Mesh
+pub async fn liveness_check() -> (StatusCode, &'static str) {
+    if crate::cluster::p2p::IS_GATEWAY_HEALTHY.load(std::sync::atomic::Ordering::Relaxed) {
+        (StatusCode::OK, "HEALTHY_LEADER\n")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "GATEWAY_DISCONNECTED\n")
+    }
+}
+
 pub async fn handle_update(State(state): State<AppState>) -> &'static str {
     state.reload_notifier.notify_one();
     "Core swap signal accepted\n"
@@ -293,7 +302,7 @@ pub async fn add_whitelisted_image(
     }
 
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_default();
@@ -406,12 +415,6 @@ pub struct UploadPluginPayload {
 pub struct TogglePluginPayload {
     pub name: String,
     pub enabled: bool,
-}
-
-#[derive(Deserialize)]
-pub struct ApproveQuotaPayload {
-    pub name: String,
-    pub approved_storage_bytes: u64,
 }
 
 #[derive(Deserialize)]

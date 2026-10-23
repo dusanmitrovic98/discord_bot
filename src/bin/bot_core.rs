@@ -7,6 +7,7 @@ use std::time::Duration;
 use tracing::{error, info};
 
 use aegis_bastion::bot::{BotContainer, BotContainerKey, Handler};
+use aegis_bastion::cluster::p2p::IS_GATEWAY_HEALTHY;
 use aegis_bastion::config::GuildConfig;
 use aegis_bastion::db::DatabaseEngine;
 
@@ -39,14 +40,14 @@ async fn main() {
     .expect("Fatal: BotContainer bootstrap failed");
 
     // =========================================================================
-    // BACKGROUND DYNAMIC SYNCHRONIZER (Dynamic Ban vs Delete Action Parity)
+    // BACKGROUND DYNAMIC SYNCHRONIZER (Dynamic Rules, Whitelist, Blacklist, WASM)
     // =========================================================================
     let sync_c = container.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
 
-            // 1. Sync Dynamic Regexes (Separates Instant Ban from Delete rules!)
+            // 1. Sync Dynamic Regexes
             if let Ok(rules) = sync_c.db.fetch_dynamic_rules().await {
                 let mut ban_patterns = Vec::new();
                 let mut delete_patterns = Vec::new();
@@ -57,7 +58,9 @@ async fn main() {
                         delete_patterns.push(r.pattern);
                     }
                 }
-                let _ = sync_c.gatekeeper.reload_dynamic_rules(&ban_patterns, &delete_patterns);
+                let _ = sync_c
+                    .gatekeeper
+                    .reload_dynamic_rules(&ban_patterns, &delete_patterns);
             }
 
             // 2. Sync Whitelist
@@ -79,8 +82,13 @@ async fn main() {
 
                 for p in records {
                     if p.enabled {
-                        if !sync_c.plugin_engine.is_bytecode_identical(&p.name, &p.bytecode.bytes) {
-                            let _ = sync_c.plugin_engine.hot_swap_plugin(&p.name, &p.bytecode.bytes);
+                        if !sync_c
+                            .plugin_engine
+                            .is_bytecode_identical(&p.name, &p.bytecode.bytes)
+                        {
+                            let _ = sync_c
+                                .plugin_engine
+                                .hot_swap_plugin(&p.name, &p.bytecode.bytes);
                         }
                     } else {
                         sync_c.plugin_engine.unload_plugin(&p.name);
@@ -94,6 +102,17 @@ async fn main() {
                     }
                 }
             }
+        }
+    });
+
+    // =========================================================================
+    // BACKGROUND XP WRITE-BACK BUFFER FLUSH TASK (60s INTERVAL)
+    // =========================================================================
+    let xp_c = container.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            xp_c.xp_buffer.flush_to_db(&xp_c.db).await;
         }
     });
 
@@ -114,11 +133,21 @@ async fn main() {
             .data
             .write()
             .await
-            .insert::<BotContainerKey>(container);
+            .insert::<BotContainerKey>(container.clone());
     }
 
     info!("Bot Core online. Connecting to Discord Gateway...");
-    if let Err(e) = client.start().await {
-        error!("Fatal Discord gateway error: {:?}", e);
+    tokio::select! {
+        res = client.start() => {
+            if let Err(e) = res {
+                error!("Fatal Discord gateway error: {:?}", e);
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Termination signal intercepted. Flushing XP buffer to Atlas before exit...");
+            container.xp_buffer.flush_to_db(&container.db).await;
+            IS_GATEWAY_HEALTHY.store(false, std::sync::atomic::Ordering::Relaxed);
+            info!("Graceful termination complete.");
+        }
     }
 }

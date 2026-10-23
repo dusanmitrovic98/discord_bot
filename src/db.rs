@@ -1,4 +1,7 @@
 //! # Database Engine & MongoDB Atlas Storage Layer
+//!
+//! Provides BSON document modeling, thread-safe Atlas client pools,
+//! cluster lease coordination, virtual user profiles, and forum room governance.
 
 use crate::{AegisError, Result};
 use mongodb::{
@@ -87,6 +90,30 @@ pub struct PluginKvEntry {
     pub updated_at: BsonDateTime,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatedRoom {
+    pub channel_id: u64,
+    pub owner_id: Option<u64>,
+    pub allowed_brackets: Vec<String>,
+    pub is_locked: bool,
+    pub created_at: BsonDateTime,
+    pub updated_at: BsonDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UserProfile {
+    pub user_id: u64,
+    pub continent: Option<String>,
+    pub country_code: Option<String>,
+    pub country_name: Option<String>,
+    pub age_bracket: Option<String>,
+    pub custom_bio: String,
+    pub xp: u64,
+    pub level: u32,
+    pub points: u64,
+    pub updated_at: BsonDateTime,
+}
+
 #[derive(Clone)]
 pub struct DatabaseEngine {
     db: Database,
@@ -97,6 +124,10 @@ impl DatabaseEngine {
         let client = Client::with_uri_str(uri).await?;
         let db = client.database(db_name);
         Ok(Self { db })
+    }
+
+    pub fn raw_database(&self) -> &Database {
+        &self.db
     }
 
     pub async fn get_storage_stats(&self) -> Result<(u64, u64)> {
@@ -274,7 +305,6 @@ impl DatabaseEngine {
         Ok(())
     }
 
-    /// Defensive BSON deserialization that gracefully handles any legacy format without failing
     pub async fn fetch_whitelisted_images(&self) -> Result<Vec<WhitelistedImage>> {
         let coll: Collection<Document> = self.db.collection("whitelisted_images");
         let mut cursor = coll.find(doc! {}).await?;
@@ -293,7 +323,6 @@ impl DatabaseEngine {
                 Err(_) => BsonDateTime::now(),
             };
 
-            // Support both hex string and legacy integer representations seamlessly
             let dhash = if let Ok(s) = doc.get_str("dhash") {
                 s.to_string()
             } else if let Ok(i) = doc.get_i64("dhash") {
@@ -443,5 +472,93 @@ impl DatabaseEngine {
             .find_one(doc! { "plugin_id": plugin_id, "key": key })
             .await?;
         Ok(entry.map(|e| e.value))
+    }
+
+    // =========================================================================
+    // FORUM ROOMS GOVERNANCE (#apartments)
+    // =========================================================================
+
+    pub async fn fetch_gated_room(&self, channel_id: u64) -> Result<Option<GatedRoom>> {
+        let coll: Collection<GatedRoom> = self.db.collection("gated_rooms");
+        let doc = coll
+            .find_one(doc! { "channel_id": channel_id as i64 })
+            .await?;
+        Ok(doc)
+    }
+
+    pub async fn save_gated_room(&self, room: GatedRoom) -> Result<()> {
+        let coll: Collection<GatedRoom> = self.db.collection("gated_rooms");
+        coll.delete_many(doc! { "channel_id": room.channel_id as i64 })
+            .await?;
+        coll.insert_one(room).await?;
+        Ok(())
+    }
+
+    pub async fn delete_gated_room(&self, channel_id: u64) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("gated_rooms");
+        coll.delete_many(doc! { "channel_id": channel_id as i64 })
+            .await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // VIRTUAL USER PROFILES & XP LEVELING
+    // =========================================================================
+
+    pub async fn fetch_user_profile(&self, user_id: u64) -> Result<Option<UserProfile>> {
+        let coll: Collection<UserProfile> = self.db.collection("user_profiles");
+        let doc = coll.find_one(doc! { "user_id": user_id as i64 }).await?;
+        Ok(doc)
+    }
+
+    pub async fn save_user_profile(&self, profile: UserProfile) -> Result<()> {
+        let coll: Collection<UserProfile> = self.db.collection("user_profiles");
+        coll.delete_many(doc! { "user_id": profile.user_id as i64 })
+            .await?;
+        coll.insert_one(profile).await?;
+        Ok(())
+    }
+
+    pub async fn add_user_xp(&self, user_id: u64, xp_gain: u64) -> Result<(u64, u32)> {
+        let coll: Collection<Document> = self.db.collection("user_profiles");
+        let filter = doc! { "user_id": user_id as i64 };
+        let update = doc! {
+            "$inc": { "xp": xp_gain as i64, "points": xp_gain as i64 },
+            "$set": { "updated_at": BsonDateTime::now() }
+        };
+        let options = mongodb::options::UpdateOptions::builder()
+            .upsert(true)
+            .build();
+        coll.update_one(filter, update)
+            .with_options(options)
+            .await?;
+
+        let profile = self
+            .fetch_user_profile(user_id)
+            .await?
+            .unwrap_or(UserProfile {
+                user_id,
+                continent: None,
+                country_code: None,
+                country_name: None,
+                age_bracket: None,
+                custom_bio: String::new(),
+                xp: xp_gain,
+                level: 0,
+                points: xp_gain,
+                updated_at: BsonDateTime::now(),
+            });
+
+        let target_level = ((profile.xp as f64 / 100.0).sqrt() as u32).min(100);
+        if target_level > profile.level {
+            coll.update_one(
+                doc! { "user_id": user_id as i64 },
+                doc! { "$set": { "level": target_level as i32 } },
+            )
+            .await?;
+            return Ok((profile.xp, target_level));
+        }
+
+        Ok((profile.xp, profile.level))
     }
 }
