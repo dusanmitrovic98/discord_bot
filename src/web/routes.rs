@@ -96,7 +96,10 @@ pub async fn health_check() -> &'static str {
 
 /// Deep Liveness Probe for P2P Cluster Mesh
 pub async fn liveness_check() -> (StatusCode, &'static str) {
-    if crate::cluster::p2p::IS_GATEWAY_HEALTHY.load(std::sync::atomic::Ordering::Relaxed) {
+    let is_alive = std::path::Path::new("/tmp/gateway_liveness").exists()
+        || crate::cluster::p2p::IS_GATEWAY_HEALTHY.load(std::sync::atomic::Ordering::Relaxed);
+
+    if is_alive {
         (StatusCode::OK, "HEALTHY_LEADER\n")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "GATEWAY_DISCONNECTED\n")

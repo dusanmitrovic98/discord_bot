@@ -147,6 +147,7 @@ async fn main() {
             info!("Termination signal intercepted. Flushing XP buffer to Atlas before exit...");
             container.xp_buffer.flush_to_db(&container.db).await;
             IS_GATEWAY_HEALTHY.store(false, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::fs::remove_file("/tmp/gateway_liveness");
             info!("Graceful termination complete.");
         }
     }
