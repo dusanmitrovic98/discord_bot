@@ -1,7 +1,4 @@
 //! # Database Engine & MongoDB Atlas Storage Layer
-//!
-//! Provides BSON document modeling, thread-safe Atlas client pools,
-//! cluster lease coordination, virtual user profiles, and forum room governance.
 
 use crate::{AegisError, Result};
 use mongodb::{
@@ -96,8 +93,36 @@ pub struct GatedRoom {
     pub owner_id: Option<u64>,
     pub allowed_brackets: Vec<String>,
     pub is_locked: bool,
+    #[serde(default = "BsonDateTime::now")]
+    pub last_activity_at: BsonDateTime,
+    #[serde(default)]
+    pub warned_for_inactivity: bool,
     pub created_at: BsonDateTime,
     pub updated_at: BsonDateTime,
+}
+
+impl GatedRoom {
+    pub fn new(channel_id: u64) -> Self {
+        let now = BsonDateTime::now();
+        Self {
+            channel_id,
+            owner_id: None,
+            allowed_brackets: Vec::new(),
+            is_locked: false,
+            last_activity_at: now,
+            warned_for_inactivity: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+fn default_preset() -> String {
+    "classic".to_string()
+}
+
+fn default_theme() -> String {
+    "crimson".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -107,11 +132,37 @@ pub struct UserProfile {
     pub country_code: Option<String>,
     pub country_name: Option<String>,
     pub age_bracket: Option<String>,
+    #[serde(default)]
+    pub age_display: Option<String>,
+    #[serde(default = "default_preset")]
+    pub preset: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     pub custom_bio: String,
     pub xp: u64,
     pub level: u32,
     pub points: u64,
     pub updated_at: BsonDateTime,
+}
+
+impl UserProfile {
+    pub fn new(user_id: u64) -> Self {
+        Self {
+            user_id,
+            continent: None,
+            country_code: None,
+            country_name: None,
+            age_bracket: None,
+            age_display: None,
+            preset: default_preset(),
+            theme: default_theme(),
+            custom_bio: String::new(),
+            xp: 0,
+            level: 0,
+            points: 0,
+            updated_at: BsonDateTime::now(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -501,8 +552,51 @@ impl DatabaseEngine {
         Ok(())
     }
 
+    pub async fn touch_room_activity(&self, channel_id: u64) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("gated_rooms");
+        let filter = doc! { "channel_id": channel_id as i64 };
+        let update = doc! {
+            "$set": {
+                "last_activity_at": BsonDateTime::now(),
+                "warned_for_inactivity": false,
+                "updated_at": BsonDateTime::now()
+            }
+        };
+        let _ = coll.update_one(filter, update).await?;
+        Ok(())
+    }
+
+    pub async fn fetch_inactive_rooms(&self, days: i64) -> Result<Vec<GatedRoom>> {
+        let coll: Collection<GatedRoom> = self.db.collection("gated_rooms");
+        let cutoff_ms = chrono::Utc::now().timestamp_millis() - (days * 86_400 * 1000);
+        let filter = doc! {
+            "owner_id": { "$ne": null },
+            "last_activity_at": { "$lt": BsonDateTime::from_millis(cutoff_ms) },
+            "warned_for_inactivity": { "$ne": true }
+        };
+        let mut cursor = coll.find(filter).await?;
+        let mut rooms = Vec::new();
+        while cursor.advance().await? {
+            rooms.push(cursor.deserialize_current()?);
+        }
+        Ok(rooms)
+    }
+
+    pub async fn mark_room_inactivity_warned(&self, channel_id: u64) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("gated_rooms");
+        let filter = doc! { "channel_id": channel_id as i64 };
+        let update = doc! {
+            "$set": {
+                "warned_for_inactivity": true,
+                "updated_at": BsonDateTime::now()
+            }
+        };
+        let _ = coll.update_one(filter, update).await?;
+        Ok(())
+    }
+
     // =========================================================================
-    // VIRTUAL USER PROFILES & XP LEVELING
+    // VIRTUAL USER PROFILES & UNCAPPED LEVELING
     // =========================================================================
 
     pub async fn fetch_user_profile(&self, user_id: u64) -> Result<Option<UserProfile>> {
@@ -536,20 +630,10 @@ impl DatabaseEngine {
         let profile = self
             .fetch_user_profile(user_id)
             .await?
-            .unwrap_or(UserProfile {
-                user_id,
-                continent: None,
-                country_code: None,
-                country_name: None,
-                age_bracket: None,
-                custom_bio: String::new(),
-                xp: xp_gain,
-                level: 0,
-                points: xp_gain,
-                updated_at: BsonDateTime::now(),
-            });
+            .unwrap_or_else(|| UserProfile::new(user_id));
 
-        let target_level = ((profile.xp as f64 / 100.0).sqrt() as u32).min(100);
+        // Exact uncapped level calculation matching inverse
+        let target_level = crate::pipeline::leveling::XpWriteBackBuffer::level_for_xp(profile.xp);
         if target_level > profile.level {
             coll.update_one(
                 doc! { "user_id": user_id as i64 },
@@ -560,5 +644,53 @@ impl DatabaseEngine {
         }
 
         Ok((profile.xp, profile.level))
+    }
+
+    // =========================================================================
+    // DOTA SHOWCASE SCENE GRAPH STORE
+    // =========================================================================
+
+    pub async fn fetch_canvas_scene(
+        &self,
+        user_id: u64,
+    ) -> Result<Option<crate::canvas::CanvasScene>> {
+        let coll: Collection<Document> = self.db.collection("canvas_scenes");
+        let doc_opt = coll.find_one(doc! { "user_id": user_id as i64 }).await?;
+        match doc_opt {
+            Some(d) => {
+                if let Ok(scene_doc) = d.get_document("scene") {
+                    let scene: crate::canvas::CanvasScene =
+                        mongodb::bson::from_document(scene_doc.clone())?;
+                    Ok(Some(scene))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn save_canvas_scene(
+        &self,
+        user_id: u64,
+        scene: &crate::canvas::CanvasScene,
+    ) -> Result<()> {
+        let coll: Collection<Document> = self.db.collection("canvas_scenes");
+        let scene_bson = mongodb::bson::to_document(scene)?;
+        let filter = doc! { "user_id": user_id as i64 };
+        let update = doc! {
+            "$set": {
+                "user_id": user_id as i64,
+                "scene": scene_bson,
+                "updated_at": BsonDateTime::now()
+            }
+        };
+        let options = mongodb::options::UpdateOptions::builder()
+            .upsert(true)
+            .build();
+        coll.update_one(filter, update)
+            .with_options(options)
+            .await?;
+        Ok(())
     }
 }

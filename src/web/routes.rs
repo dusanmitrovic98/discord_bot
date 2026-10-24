@@ -25,6 +25,11 @@ use crate::web::AppState;
 
 const FALLBACK_DASHBOARD_HTML: &str = include_str!("../dashboard.html");
 
+pub const MASTER_STUDIO_SALT: [u8; 32] = [
+    0xe2, 0x9d, 0xae, 0xf6, 0x71, 0x41, 0xba, 0x1e, 0xce, 0x83, 0x56, 0x7e, 0x46, 0x03, 0x18, 0xdb,
+    0x95, 0x9c, 0xa6, 0x66, 0x6d, 0xdd, 0x43, 0x5c, 0xbf, 0x0a, 0xea, 0x4e, 0x3f, 0x9c, 0x79, 0x6c,
+];
+
 pub async fn serve_dashboard() -> Response {
     if let Ok(gist_url) = std::env::var("DASHBOARD_GIST_URL") {
         let mut clean_url = gist_url.trim().to_string();
@@ -115,6 +120,177 @@ pub async fn get_live_logs(
     State(state): State<AppState>,
 ) -> Json<Vec<crate::telemetry::LiveLogEntry>> {
     Json(state.log_buffer.get_entries())
+}
+
+// =============================================================================
+// WEB CANVAS STUDIO (DOTA 2 PROFILE SHOWCASE)
+// =============================================================================
+
+const STUDIO_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><title>Chill Zone // Profile Studio</title>
+<style>
+body { background: #090a0d; color: #f3f4f6; font-family: -apple-system, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 24px; margin: 0; }
+.studio-box { background: #121418; border: 1px solid #262930; border-radius: 8px; padding: 24px; width: 840px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+h2 { margin: 0 0 6px 0; font-size: 1.3rem; }
+p { color: #9ca3af; font-size: 0.85rem; margin: 0 0 16px 0; }
+canvas { background: #0b0d11; border: 1px solid #e05638; border-radius: 4px; display: block; margin: 0 auto; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+.toolbar { display: flex; gap: 10px; margin-top: 18px; align-items: center; }
+button { background: #1a1d24; color: #f3f4f6; border: 1px solid #3a3f4a; padding: 8px 16px; border-radius: 4px; font-weight: 600; cursor: pointer; transition: 0.15s; font-size: 0.82rem; }
+button:hover { background: #262930; border-color: #e05638; }
+.btn-save { background: #e05638; border-color: #e05638; color: #fff; margin-left: auto; }
+.btn-save:hover { background: #ff6b4a; }
+#status-msg { font-size: 0.85rem; color: #10b981; font-weight: bold; margin-left: 12px; }
+</style>
+</head>
+<body>
+<div class="studio-box">
+  <h2>Dota 2 Showcase Profile Studio</h2>
+  <p>Visual canvas customizer for your Chill Zone passport. Drag widgets, adjust layout, and sync live to Discord.</p>
+  <canvas id="cv" width="800" height="400"></canvas>
+  <div class="toolbar">
+    <button onclick="applyPreset('classic')">Preset: Classic</button>
+    <button onclick="applyPreset('showcase')">Preset: Showcase</button>
+    <button onclick="toggleGrid()">Grid: <span id="grid-lbl">OFF</span></button>
+    <button class="btn-save" onclick="saveScene()">✓ Save to Discord</button>
+    <span id="status-msg"></span>
+  </div>
+</div>
+<script>
+let scene = null;
+let showGrid = false;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const auth = new URLSearchParams(window.location.search).get('auth') || '';
+
+async function init() {
+  try {
+    const res = await fetch('/api/studio/scene?auth=' + encodeURIComponent(auth));
+    if (res.ok) { scene = await res.json(); render(); }
+  } catch(e) {}
+}
+
+function render() {
+  ctx.fillStyle = '#0b0d11'; ctx.fillRect(0,0,800,400);
+  if (showGrid) {
+    ctx.strokeStyle = '#181b22';
+    for(let x=0; x<800; x+=20){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,400); ctx.stroke(); }
+    for(let y=0; y<400; y+=20){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(800,y); ctx.stroke(); }
+  }
+  ctx.fillStyle = '#121418'; ctx.fillRect(12,12,776,376);
+  ctx.strokeStyle = '#262930'; ctx.strokeRect(12,12,776,376);
+  ctx.fillStyle = '#e05638'; ctx.fillRect(12,12,776,6);
+
+  if (scene && scene.layers) {
+    scene.layers.forEach(l => {
+      ctx.fillStyle = '#262930'; ctx.fillRect(l.transform.x, l.transform.y, 140, 40);
+      ctx.strokeStyle = '#e05638'; ctx.strokeRect(l.transform.x, l.transform.y, 140, 40);
+      ctx.fillStyle = '#f3f4f6'; ctx.font = 'bold 13px sans-serif';
+      ctx.fillText(l.layer_id, l.transform.x + 10, l.transform.y + 25);
+    });
+  }
+}
+
+function toggleGrid() { showGrid = !showGrid; document.getElementById('grid-lbl').innerText = showGrid?'ON':'OFF'; render(); }
+function applyPreset(p) {
+  if (p === 'showcase') {
+    scene.layers.forEach(l => { if (l.layer_id === 'avatar') { l.transform.x = 340; l.transform.y = 40; } });
+  } else {
+    scene.layers.forEach(l => { if (l.layer_id === 'avatar') { l.transform.x = 45; l.transform.y = 55; } });
+  }
+  render();
+}
+async function saveScene() {
+  const res = await fetch('/api/studio/save?auth=' + encodeURIComponent(auth), {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(scene)
+  });
+  if (res.ok) document.getElementById('status-msg').innerText = '✓ Saved to Discord!';
+}
+init();
+</script>
+</body></html>"#;
+
+pub async fn serve_studio(Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+    if let Some(auth) = q.get("auth") {
+        if verify_studio_token(auth).is_some() {
+            return ([(CONTENT_TYPE, "text/html; charset=utf-8")], STUDIO_HTML).into_response();
+        }
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        "Invalid or expired studio authorization token",
+    )
+        .into_response()
+}
+
+pub async fn get_studio_scene(
+    State(state): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let auth = q.get("auth").cloned().unwrap_or_default();
+    let user_id = match verify_studio_token(&auth) {
+        Some(uid) => uid,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let scene = state
+        .db
+        .fetch_canvas_scene(user_id)
+        .await
+        .unwrap_or(None)
+        .unwrap_or_else(crate::canvas::CanvasScene::default_classic);
+
+    Json(scene).into_response()
+}
+
+pub async fn save_studio_scene(
+    State(state): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    Json(scene): Json<crate::canvas::CanvasScene>,
+) -> Response {
+    let auth = q.get("auth").cloned().unwrap_or_default();
+    let user_id = match verify_studio_token(&auth) {
+        Some(uid) => uid,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    if scene.layers.len() > crate::canvas::MAX_LAYERS {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Exceeded maximum layer capacity bound of 12",
+        )
+            .into_response();
+    }
+
+    let _ = state.db.save_canvas_scene(user_id, &scene).await;
+    StatusCode::OK.into_response()
+}
+
+pub fn create_studio_token(user_id: u64) -> String {
+    let expires = chrono::Utc::now().timestamp() + 900; // 15 min TTL
+    let payload = format!("{}:{}", user_id, expires);
+    let sig = CryptoEngine::sha256(format!("{}:{:?}", payload, MASTER_STUDIO_SALT).as_bytes());
+    format!("{}.{}.{}", user_id, expires, sig)
+}
+
+pub fn verify_studio_token(token: &str) -> Option<u64> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let user_id: u64 = parts[0].parse().ok()?;
+    let expires: i64 = parts[1].parse().ok()?;
+    if chrono::Utc::now().timestamp() > expires {
+        return None;
+    }
+    let payload = format!("{}:{}", user_id, expires);
+    let expected = CryptoEngine::sha256(format!("{}:{:?}", payload, MASTER_STUDIO_SALT).as_bytes());
+    if parts[2] == expected {
+        Some(user_id)
+    } else {
+        None
+    }
 }
 
 // =============================================================================

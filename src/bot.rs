@@ -2,7 +2,7 @@
 
 use serenity::async_trait;
 use serenity::builder::{
-    CreateCommand, CreateCommandOption, CreateEmbed, CreateInteractionResponse,
+    CreateAttachment, CreateCommand, CreateCommandOption, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, EditMember,
 };
 use serenity::model::application::{
@@ -119,7 +119,6 @@ pub struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
         crate::cluster::p2p::IS_GATEWAY_HEALTHY.store(true, Ordering::Relaxed);
-
         let _ = std::fs::write("/tmp/gateway_liveness", "HEALTHY");
 
         let c = get_container(&ctx).await;
@@ -131,13 +130,13 @@ impl EventHandler for Handler {
         let guild_id = GuildId::new(c.config.authorized_guild_id);
         let mut commands = vec![
             CreateCommand::new("profile")
-                .description("View Chill Zone virtual passport")
+                .description("View Chill Zone graphical passport")
                 .add_option(
                     CreateCommandOption::new(CommandOptionType::User, "user", "Target member")
                         .required(false),
                 ),
             CreateCommand::new("profile-edit")
-                .description("Configure country, age group, or bio")
+                .description("Configure country, age, bio, preset, or theme")
                 .add_option(
                     CreateCommandOption::new(
                         CommandOptionType::String,
@@ -150,7 +149,7 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(
                         CommandOptionType::String,
                         "age",
-                        "Age group (18-19, 20-24, 25-29, 30-34, 35-39, 40-44, 45-49, 50+)",
+                        "Your age number (e.g. 28) or bracket (25-29)",
                     )
                     .required(false),
                 )
@@ -161,7 +160,26 @@ impl EventHandler for Handler {
                         "Custom markdown bio (up to 2000 chars)",
                     )
                     .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "preset",
+                        "Layout preset: classic, showcase, compact",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "theme",
+                        "Color theme: crimson, cyan, emerald, amber, amethyst",
+                    )
+                    .required(false),
                 ),
+            CreateCommand::new("studio").description(
+                "Open the Web Canvas Visual Studio to customize your profile showcase",
+            ),
             CreateCommand::new("room-owner-set")
                 .description("Staff: manage room owner or lock status")
                 .add_option(
@@ -209,7 +227,7 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(
                         CommandOptionType::Integer,
                         "level",
-                        "Target level (0-100)",
+                        "Target level (uncapped)",
                     )
                     .required(true),
                 ),
@@ -347,7 +365,6 @@ impl EventHandler for Handler {
                 ctx.http.clone(),
                 c.config.clone(),
             ));
-            // ADVISORY INVARIANT: Alert moderators with evidence; do not execute automated ban
             send_mod_alert(
                 &ctx,
                 &c.config,
@@ -406,7 +423,6 @@ impl EventHandler for Handler {
 
         match eval.verdict {
             ThreatVerdict::InstantBan => {
-                // ADVISORY INVARIANT: Reset nickname if possible and alert moderators
                 if let Some(ref member) = new {
                     if member.nick.is_some() {
                         let _ = event
@@ -552,7 +568,7 @@ impl EventHandler for Handler {
         // 4. NATIVE LEVELING ACCUMULATION
         if let Some((user_id, current_xp)) = c.xp_buffer.process_chat_message(&msg).await {
             let xp_64 = current_xp as u64;
-            let target_level = ((xp_64 as f64 / 100.0).sqrt() as u32).min(100);
+            let target_level = XpWriteBackBuffer::level_for_xp(xp_64);
             if xp_64 >= XpWriteBackBuffer::xp_for_level(target_level) && target_level > 0 {
                 broadcast_level_up(&ctx, user_id, target_level).await;
             }
@@ -875,6 +891,7 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
     match cmd.data.name.as_str() {
         "profile" => cmd_profile(ctx, c, &cmd).await,
         "profile-edit" => cmd_profile_edit(ctx, c, &cmd).await,
+        "studio" => cmd_studio(ctx, c, &cmd).await,
         "room-claim" => cmd_room_claim(ctx, c, &cmd).await,
         "room-gate" => cmd_room_gate(ctx, c, &cmd).await,
         "room-owner-set" => {
@@ -978,6 +995,34 @@ async fn handle_slash_command(ctx: &Context, c: &BotContainer, cmd: CommandInter
 // COMMAND HANDLERS
 // =============================================================================
 
+async fn cmd_studio(ctx: &Context, _c: &BotContainer, cmd: &CommandInteraction) {
+    let user_id = cmd.user.id.get();
+    let token = crate::web::routes::create_studio_token(user_id);
+    let studio_url = format!(
+        "https://discord-bot-gt8e.onrender.com/studio?auth={}",
+        token
+    );
+
+    let reply = format!(
+        "🎨 **Dota 2 Profile Showcase Studio Ready!**\n\
+        Open the interactive canvas studio in your browser (valid for 15 mins):\n\
+        <{}>\n\n\
+        *Drag widgets, toggle grid, arrange chips, and save directly to Discord.*",
+        studio_url
+    );
+
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(reply)
+                    .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
 async fn cmd_profile(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
     let mut target_user_id = cmd.user.id.get();
     let mut target_name = cmd.user.name.clone();
@@ -993,16 +1038,23 @@ async fn cmd_profile(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) 
         }
     }
 
+    let _ = cmd.defer(&ctx.http).await;
+
     let profile =
         c.db.fetch_user_profile(target_user_id)
             .await
             .unwrap_or(None);
+    let scene =
+        c.db.fetch_canvas_scene(target_user_id)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_else(crate::canvas::CanvasScene::default_classic);
 
-    let (country, continent, age_group, bio, level, xp, points) = match profile {
+    let (country, continent, age_display, bio, level, xp, points) = match profile {
         Some(p) => (
             p.country_name.unwrap_or_else(|| "Unspecified".into()),
             p.continent.unwrap_or_else(|| "Unspecified".into()),
-            p.age_bracket.unwrap_or_else(|| "Unspecified".into()),
+            p.age_display.unwrap_or_else(|| "Unspecified".into()),
             p.custom_bio,
             p.level,
             p.xp,
@@ -1012,34 +1064,57 @@ async fn cmd_profile(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) 
             "Unspecified".into(),
             "Unspecified".into(),
             "Unspecified".into(),
-            "This member has not customized their Chill Zone profile yet.".into(),
+            String::new(),
             0,
             0,
             0,
         ),
     };
 
-    let embed = CreateEmbed::new()
-        .title(format!("Chill Zone Passport // {}", target_name))
-        .field("Continent", continent, true)
-        .field("Country", country, true)
-        .field("Age Group", age_group, true)
-        .field("Server Rank", format!("Level {} ({} XP)", level, xp), true)
-        .field("Cosmetic Points", points.to_string(), true)
-        .description(if bio.is_empty() { "No bio set." } else { &bio })
-        .color(0xe05638)
-        .footer(serenity::builder::CreateEmbedFooter::new(
-            "Use /profile-edit to customize your identity",
-        ));
+    let avatar_url = cmd
+        .data
+        .resolved
+        .users
+        .get(&UserId::new(target_user_id))
+        .and_then(|u| u.avatar_url())
+        .or_else(|| cmd.user.avatar_url());
 
+    let mut avatar_bytes = None;
+    if let Some(ref url) = avatar_url {
+        if let Ok(payload) = c.media_inspector.inspect_url(url).await {
+            avatar_bytes = Some(payload.bytes);
+        }
+    }
+
+    // 1. RENDER MODULAR 2D SCENE GRAPH CANVAS (MESSAGE 1)
+    let card_png = crate::canvas::CanvasCompositor::render_scene(
+        &scene,
+        &target_name,
+        &continent,
+        &country,
+        &age_display,
+        level,
+        xp,
+        points,
+        avatar_bytes.as_deref(),
+    );
+
+    let attachment = CreateAttachment::bytes(card_png, "profile.png");
     let _ = cmd
-        .create_response(
+        .edit_response(
             &ctx.http,
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new().embed(embed),
-            ),
+            EditInteractionResponse::new().new_attachment(attachment),
         )
         .await;
+
+    // 2. DISPATCH COMPANION RAW MARKDOWN BIO (MESSAGE 2 - ZERO BOT BRANDING)
+    let clean_bio = bio.trim();
+    if !clean_bio.is_empty() {
+        let _ = cmd
+            .channel_id
+            .send_message(&ctx.http, CreateMessage::new().content(clean_bio))
+            .await;
+    }
 }
 
 async fn cmd_profile_edit(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
@@ -1047,20 +1122,37 @@ async fn cmd_profile_edit(ctx: &Context, c: &BotContainer, cmd: &CommandInteract
     let mut country_code_opt = None;
     let mut age_opt = None;
     let mut bio_opt = None;
+    let mut preset_opt = None;
+    let mut theme_opt = None;
 
     for opt in &cmd.data.options {
-        if opt.name == "country" {
-            if let CommandDataOptionValue::String(s) = &opt.value {
-                country_code_opt = Some(s.trim().to_uppercase());
+        match opt.name.as_str() {
+            "country" => {
+                if let CommandDataOptionValue::String(s) = &opt.value {
+                    country_code_opt = Some(s.trim().to_uppercase());
+                }
             }
-        } else if opt.name == "age" {
-            if let CommandDataOptionValue::String(s) = &opt.value {
-                age_opt = Some(s.trim().to_string());
+            "age" => {
+                if let CommandDataOptionValue::String(s) = &opt.value {
+                    age_opt = Some(s.trim().to_string());
+                }
             }
-        } else if opt.name == "bio" {
-            if let CommandDataOptionValue::String(s) = &opt.value {
-                bio_opt = Some(s.trim().to_string());
+            "bio" => {
+                if let CommandDataOptionValue::String(s) = &opt.value {
+                    bio_opt = Some(s.trim().to_string());
+                }
             }
+            "preset" => {
+                if let CommandDataOptionValue::String(s) = &opt.value {
+                    preset_opt = Some(s.trim().to_lowercase());
+                }
+            }
+            "theme" => {
+                if let CommandDataOptionValue::String(s) = &opt.value {
+                    theme_opt = Some(s.trim().to_lowercase());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1068,18 +1160,7 @@ async fn cmd_profile_edit(ctx: &Context, c: &BotContainer, cmd: &CommandInteract
         c.db.fetch_user_profile(user_id)
             .await
             .unwrap_or(None)
-            .unwrap_or(UserProfile {
-                user_id,
-                continent: None,
-                country_code: None,
-                country_name: None,
-                age_bracket: None,
-                custom_bio: String::new(),
-                xp: 0,
-                level: 0,
-                points: 0,
-                updated_at: mongodb::bson::DateTime::now(),
-            });
+            .unwrap_or_else(|| UserProfile::new(user_id));
 
     if let Some(ref code) = country_code_opt {
         if let Some(entry) = lookup_country_by_code(code) {
@@ -1087,35 +1168,76 @@ async fn cmd_profile_edit(ctx: &Context, c: &BotContainer, cmd: &CommandInteract
             profile.country_name = Some(entry.name.to_string());
             profile.continent = Some(entry.continent.as_str().to_string());
         } else {
-            let _ = cmd
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Invalid ISO-2 country code. Valid examples: `RS`, `US`, `DE`, `FR`, `JP`.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("Invalid ISO-2 country code. Valid examples: `RS`, `US`, `DE`, `FR`, `JP`.").ephemeral(true))).await;
             return;
         }
     }
 
     if let Some(ref age_str) = age_opt {
-        if let Some(bracket) = AgeBracket::from_str_strict(age_str) {
-            profile.age_bracket = Some(bracket.as_str().to_string());
-        } else {
-            let _ = cmd
-                .create_response(
+        if let Ok(num) = age_str.parse::<u32>() {
+            if num < 18 {
+                // DO NOT BAN: Report advisory violation with full telemetry
+                send_mod_alert(
+                    ctx,
+                    &c.config,
+                    "🚨 Underage Profile Age Attempt",
+                    &format!("User <@{}> attempted to set profile age to `{}`. Server policy is strictly 18+. Review advised.", user_id, num),
+                    user_id,
+                ).await;
+
+                let _ = cmd.create_response(
                     &ctx.http,
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
-                            .content("Invalid age group. Valid: `18-19`, `20-24`, `25-29`, `30-34`, `35-39`, `40-44`, `45-49`, `50+`.")
+                            .content("⚠️ Notice: \"The Chill Zone\" is strictly an adult community (18+). Setting an age under 18 is prohibited and has been reported to staff.")
                             .ephemeral(true),
                     ),
-                )
-                .await;
+                ).await;
+                return;
+            }
+
+            // Concrete age displayed, senior scam defense (50+), and bracket role mapping
+            let (bracket_str, display_str) = if num >= 50 {
+                ("50+".to_string(), "50+".to_string())
+            } else if num >= 45 {
+                ("45-49".to_string(), num.to_string())
+            } else if num >= 40 {
+                ("40-44".to_string(), num.to_string())
+            } else if num >= 35 {
+                ("35-39".to_string(), num.to_string())
+            } else if num >= 30 {
+                ("30-34".to_string(), num.to_string())
+            } else if num >= 25 {
+                ("25-29".to_string(), num.to_string())
+            } else if num >= 20 {
+                ("20-24".to_string(), num.to_string())
+            } else {
+                ("18-19".to_string(), num.to_string())
+            };
+
+            profile.age_bracket = Some(bracket_str);
+            profile.age_display = Some(display_str);
+        } else if let Some(bracket) = AgeBracket::from_str_strict(age_str) {
+            profile.age_bracket = Some(bracket.as_str().to_string());
+            profile.age_display = Some(bracket.as_str().to_string());
+        } else {
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("Invalid age. Enter a number (18-120) or bracket (e.g. `27` or `25-29`).").ephemeral(true))).await;
             return;
+        }
+    }
+
+    if let Some(preset) = preset_opt {
+        if matches!(preset.as_str(), "classic" | "showcase" | "compact") {
+            profile.preset = preset;
+        }
+    }
+
+    if let Some(theme) = theme_opt {
+        if matches!(
+            theme.as_str(),
+            "crimson" | "cyan" | "emerald" | "amber" | "gold" | "amethyst"
+        ) {
+            profile.theme = theme;
         }
     }
 
@@ -1185,14 +1307,7 @@ async fn cmd_room_claim(ctx: &Context, c: &BotContainer, cmd: &CommandInteractio
         c.db.fetch_gated_room(thread_id)
             .await
             .unwrap_or(None)
-            .unwrap_or(GatedRoom {
-                channel_id: thread_id,
-                owner_id: None,
-                allowed_brackets: Vec::new(),
-                is_locked: false,
-                created_at: mongodb::bson::DateTime::now(),
-                updated_at: mongodb::bson::DateTime::now(),
-            });
+            .unwrap_or_else(|| GatedRoom::new(thread_id));
 
     if let Some(existing_owner) = room.owner_id {
         let reply = if existing_owner == caller_id {
@@ -1262,14 +1377,7 @@ async fn cmd_room_gate(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction
         c.db.fetch_gated_room(thread_id)
             .await
             .unwrap_or(None)
-            .unwrap_or(GatedRoom {
-                channel_id: thread_id,
-                owner_id: None,
-                allowed_brackets: Vec::new(),
-                is_locked: false,
-                created_at: mongodb::bson::DateTime::now(),
-                updated_at: mongodb::bson::DateTime::now(),
-            });
+            .unwrap_or_else(|| GatedRoom::new(thread_id));
 
     let caller_roles: Vec<u64> = cmd
         .member
@@ -1365,14 +1473,7 @@ async fn cmd_room_owner_set(ctx: &Context, c: &BotContainer, cmd: &CommandIntera
         c.db.fetch_gated_room(target_thread_id)
             .await
             .unwrap_or(None)
-            .unwrap_or(GatedRoom {
-                channel_id: target_thread_id,
-                owner_id: None,
-                allowed_brackets: Vec::new(),
-                is_locked: false,
-                created_at: mongodb::bson::DateTime::now(),
-                updated_at: mongodb::bson::DateTime::now(),
-            });
+            .unwrap_or_else(|| GatedRoom::new(target_thread_id));
 
     match action.as_str() {
         "assign" => {
@@ -1462,7 +1563,7 @@ async fn cmd_xp_set(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
             }
         } else if opt.name == "level" {
             if let CommandDataOptionValue::Integer(lvl) = &opt.value {
-                target_level = (*lvl).clamp(0, 100) as u32;
+                target_level = *lvl as u32;
             }
         }
     }
@@ -1472,18 +1573,7 @@ async fn cmd_xp_set(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) {
         c.db.fetch_user_profile(target_id)
             .await
             .unwrap_or(None)
-            .unwrap_or(UserProfile {
-                user_id: target_id,
-                continent: None,
-                country_code: None,
-                country_name: None,
-                age_bracket: None,
-                custom_bio: String::new(),
-                xp: calculated_xp,
-                level: target_level,
-                points: calculated_xp,
-                updated_at: mongodb::bson::DateTime::now(),
-            });
+            .unwrap_or_else(|| UserProfile::new(target_id));
 
     profile.level = target_level;
     profile.xp = calculated_xp;

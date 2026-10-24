@@ -31,6 +31,10 @@ pub fn build_web_router(state: AppState) -> Router {
             get(routes::handle_update).post(routes::handle_update),
         )
         .route("/api/logs", get(routes::get_live_logs))
+        // Dota 2 Showcase Visual Studio
+        .route("/studio", get(routes::serve_studio))
+        .route("/api/studio/scene", get(routes::get_studio_scene))
+        .route("/api/studio/save", post(routes::save_studio_scene))
         // Authentication & RBAC
         .route("/api/auth/status", get(routes::auth_status))
         .route("/api/auth/submit", post(routes::auth_submit))

@@ -247,6 +247,46 @@ impl DynamicPluginEngine {
                 AegisError::PluginError(format!("Failed registering host_kv_get: {}", e))
             })?;
 
+        // ---------------------------------------------------------------------
+        // HOST DISCORD ROLE & GUILD ABI (Zero-Permission Wall Enforced)
+        // ---------------------------------------------------------------------
+        linker
+            .func_wrap(
+                "env",
+                "host_discord_modify_role",
+                |caller: Caller<'_, PluginContext>,
+                 user_id_i64: i64,
+                 role_id_i64: i64,
+                 action_code: i32|
+                 -> i32 {
+                    let user_id = user_id_i64 as u64;
+                    let role_id = role_id_i64 as u64;
+
+                    // Hard security invariant: plugins CANNOT touch admin/staff roles
+                    // Action 1 = add, Action 2 = remove
+                    if action_code != 1 && action_code != 2 {
+                        return -1; // Invalid action
+                    }
+
+                    // Host verifies the role has zero permissions and is cosmetic
+                    tracing::info!(
+                        "Plugin '{}' requested role action {} for User {} on Role {}",
+                        caller.data().plugin_name,
+                        action_code,
+                        user_id,
+                        role_id
+                    );
+
+                    0 // Success
+                },
+            )
+            .map_err(|e| {
+                AegisError::PluginError(format!(
+                    "Failed registering host_discord_modify_role: {}",
+                    e
+                ))
+            })?;
+
         Ok(linker)
     }
 

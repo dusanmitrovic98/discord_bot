@@ -1,4 +1,5 @@
 pub mod bot;
+pub mod canvas;
 pub mod cluster;
 pub mod config;
 pub mod constants;
@@ -40,7 +41,10 @@ pub enum AegisError {
     SerializationError(#[from] serde_json::Error),
 
     #[error("BSON Deserialization error: {0}")]
-    BsonError(#[from] mongodb::bson::de::Error),
+    BsonDeError(#[from] mongodb::bson::de::Error),
+
+    #[error("BSON Serialization error: {0}")]
+    BsonSerError(#[from] mongodb::bson::ser::Error),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

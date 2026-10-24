@@ -1,7 +1,4 @@
-//! # Native Anti-Spam Leveling & XP Engine
-//!
-//! Accumulates chat XP in RAM with 60-second cooldowns, minimum 5 characters,
-//! and batch writes back to MongoDB Atlas. Dispatches announcements strictly to #1562094497452785664.
+//! # Native Anti-Spam Leveling & XP Engine (Uncapped)
 
 use serenity::builder::{CreateEmbed, CreateMessage};
 use serenity::model::channel::Message;
@@ -24,10 +21,20 @@ impl XpWriteBackBuffer {
         Self::default()
     }
 
-    /// Calculate required cumulative XP for Level L (NASA Rule 2 bounded math).
+    /// Calculate required cumulative XP for Level L (Uncapped).
     pub fn xp_for_level(level: u32) -> u64 {
         let l = level as u64;
         5 * (l * l) + (50 * l) + 100
+    }
+
+    /// Exact quadratic inverse: computes level directly from lifetime XP (Uncapped).
+    pub fn level_for_xp(xp: u64) -> u32 {
+        if xp < 100 {
+            0
+        } else {
+            let term = 5.0 + (xp as f64 / 5.0);
+            (term.sqrt() - 5.0) as u32
+        }
     }
 
     pub async fn process_chat_message(&self, msg: &Message) -> Option<(u64, u32)> {
