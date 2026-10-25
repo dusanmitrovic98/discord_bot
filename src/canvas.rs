@@ -1,8 +1,4 @@
 //! # Dynamic 2D Scene Graph & Canvas Showcase Compositor
-//!
-//! Evaluates a multi-layer scene graph (Translation, Rotation, Scale, Z-Index)
-//! and renders an 800x400 showcase image in RAM using pure Rust affine geometry.
-//! Strictly enforces NASA Rules 2 (bounded loops <= 12 layers) and 3 (memory bounds).
 
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
@@ -18,10 +14,21 @@ const FONT_8X8: &[u8; 95 * 8] = include_bytes!("../assets/font8x8.bin");
 pub struct Transform2D {
     pub x: i32,
     pub y: i32,
-    pub scale: f32,        // 0.2 to 3.0
-    pub rotation_deg: f32, // 0.0 to 360.0
-    pub z_index: i16,      // -100 to 100
-    pub opacity: f32,      // 0.0 to 1.0
+    #[serde(default = "default_scale")]
+    pub scale: f32,
+    #[serde(default)]
+    pub rotation_deg: f32,
+    #[serde(default)]
+    pub z_index: i16,
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+}
+
+fn default_scale() -> f32 {
+    1.0
+}
+fn default_opacity() -> f32 {
+    1.0
 }
 
 impl Default for Transform2D {
@@ -38,49 +45,25 @@ impl Default for Transform2D {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type")]
-pub enum LayerKind {
-    Wallpaper {
-        theme: String,
-    },
-    Avatar {
-        radius: u32,
-        frame_color: [u8; 4],
-    },
-    Username {
-        font_scale: u32,
-        color: [u8; 4],
-    },
-    StatChip {
-        label: String,
-        value: String,
-        accent: [u8; 4],
-    },
-    Badge {
-        text: String,
-        bg_color: [u8; 4],
-    },
-    XpBar {
-        width: u32,
-        height: u32,
-        accent: [u8; 4],
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CanvasLayer {
     pub layer_id: String,
-    pub kind: LayerKind,
     pub transform: Transform2D,
-    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CanvasScene {
+    #[serde(default = "default_width")]
     pub width: u32,
+    #[serde(default = "default_height")]
     pub height: u32,
-    pub background_scrim: f32, // 0.0 to 1.0 alpha tint
     pub layers: Vec<CanvasLayer>,
+}
+
+fn default_width() -> u32 {
+    CANVAS_WIDTH
+}
+fn default_height() -> u32 {
+    CANVAS_HEIGHT
 }
 
 impl Default for CanvasScene {
@@ -94,154 +77,62 @@ impl CanvasScene {
         Self {
             width: CANVAS_WIDTH,
             height: CANVAS_HEIGHT,
-            background_scrim: 0.35,
             layers: vec![
                 CanvasLayer {
-                    layer_id: "bg".into(),
-                    kind: LayerKind::Wallpaper {
-                        theme: "crimson".into(),
-                    },
-                    transform: Transform2D {
-                        x: 0,
-                        y: 0,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: -10,
-                        opacity: 1.0,
-                    },
-                    visible: true,
-                },
-                CanvasLayer {
                     layer_id: "avatar".into(),
-                    kind: LayerKind::Avatar {
-                        radius: 55,
-                        frame_color: [245, 158, 11, 255],
-                    },
                     transform: Transform2D {
                         x: 45,
                         y: 55,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 10,
-                        opacity: 1.0,
+                        ..Default::default()
                     },
-                    visible: true,
                 },
                 CanvasLayer {
                     layer_id: "username".into(),
-                    kind: LayerKind::Username {
-                        font_scale: 3,
-                        color: [243, 244, 246, 255],
-                    },
                     transform: Transform2D {
                         x: 180,
                         y: 60,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 20,
-                        opacity: 1.0,
+                        ..Default::default()
                     },
-                    visible: true,
                 },
                 CanvasLayer {
-                    layer_id: "lvl_badge".into(),
-                    kind: LayerKind::Badge {
-                        text: "LVL".into(),
-                        bg_color: [224, 86, 56, 255],
-                    },
+                    layer_id: "badges".into(),
                     transform: Transform2D {
                         x: 180,
                         y: 105,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 20,
-                        opacity: 1.0,
+                        ..Default::default()
                     },
-                    visible: true,
                 },
                 CanvasLayer {
-                    layer_id: "pts_badge".into(),
-                    kind: LayerKind::Badge {
-                        text: "PTS".into(),
-                        bg_color: [16, 185, 129, 255],
-                    },
-                    transform: Transform2D {
-                        x: 290,
-                        y: 105,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 20,
-                        opacity: 1.0,
-                    },
-                    visible: true,
-                },
-                CanvasLayer {
-                    layer_id: "continent".into(),
-                    kind: LayerKind::StatChip {
-                        label: "CONTINENT".into(),
-                        value: "Europe".into(),
-                        accent: [99, 102, 241, 255],
-                    },
+                    layer_id: "chip_continent".into(),
                     transform: Transform2D {
                         x: 45,
                         y: 195,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 30,
-                        opacity: 1.0,
+                        ..Default::default()
                     },
-                    visible: true,
                 },
                 CanvasLayer {
-                    layer_id: "country".into(),
-                    kind: LayerKind::StatChip {
-                        label: "COUNTRY".into(),
-                        value: "Serbia".into(),
-                        accent: [236, 72, 153, 255],
-                    },
+                    layer_id: "chip_country".into(),
                     transform: Transform2D {
                         x: 290,
                         y: 195,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 30,
-                        opacity: 1.0,
+                        ..Default::default()
                     },
-                    visible: true,
                 },
                 CanvasLayer {
-                    layer_id: "age".into(),
-                    kind: LayerKind::StatChip {
-                        label: "AGE".into(),
-                        value: "28".into(),
-                        accent: [245, 158, 11, 255],
-                    },
+                    layer_id: "chip_age".into(),
                     transform: Transform2D {
                         x: 535,
                         y: 195,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 30,
-                        opacity: 1.0,
+                        ..Default::default()
                     },
-                    visible: true,
                 },
                 CanvasLayer {
                     layer_id: "xp_bar".into(),
-                    kind: LayerKind::XpBar {
-                        width: 710,
-                        height: 24,
-                        accent: [224, 86, 56, 255],
-                    },
                     transform: Transform2D {
                         x: 45,
                         y: 305,
-                        scale: 1.0,
-                        rotation_deg: 0.0,
-                        z_index: 40,
-                        opacity: 1.0,
+                        ..Default::default()
                     },
-                    visible: true,
                 },
             ],
         }
@@ -250,8 +141,8 @@ impl CanvasScene {
 
 pub struct CanvasCompositor;
 
+#[allow(clippy::too_many_arguments)]
 impl CanvasCompositor {
-    /// Renders the complete scene graph to PNG bytes in RAM.
     pub fn render_scene(
         scene: &CanvasScene,
         username: &str,
@@ -264,139 +155,107 @@ impl CanvasCompositor {
         avatar_bytes: Option<&[u8]>,
     ) -> Vec<u8> {
         let mut img = RgbaImage::from_pixel(CANVAS_WIDTH, CANVAS_HEIGHT, Rgba([11, 13, 17, 255]));
+        let accent = Rgba([224, 86, 56, 255]); // Crimson
 
-        // Sort layers strictly by Z-index (NASA Rule 1: simple deterministic sorting)
-        let mut sorted_layers: Vec<&CanvasLayer> = scene
-            .layers
-            .iter()
-            .filter(|l| l.visible)
-            .take(MAX_LAYERS)
-            .collect();
-        sorted_layers.sort_by_key(|l| l.transform.z_index);
+        // Base Card
+        Self::draw_filled_rect(
+            &mut img,
+            12,
+            12,
+            CANVAS_WIDTH - 24,
+            CANVAS_HEIGHT - 24,
+            Rgba([18, 20, 24, 255]),
+        );
+        Self::draw_rect_outline(
+            &mut img,
+            12,
+            12,
+            CANVAS_WIDTH - 24,
+            CANVAS_HEIGHT - 24,
+            Rgba([38, 41, 48, 255]),
+        );
+        Self::draw_filled_rect(&mut img, 12, 12, CANVAS_WIDTH - 24, 6, accent);
 
-        for layer in sorted_layers {
-            let t = &layer.transform;
-            let tx = t.x.clamp(-100, CANVAS_WIDTH as i32 + 100);
-            let ty = t.y.clamp(-100, CANVAS_HEIGHT as i32 + 100);
+        let mut layers = scene.layers.clone();
+        layers.sort_by_key(|l| l.transform.z_index);
 
-            match &layer.kind {
-                LayerKind::Wallpaper { theme } => {
-                    let accent = match theme.as_str() {
-                        "cyan" => Rgba([6, 182, 212, 255]),
-                        "emerald" => Rgba([16, 185, 129, 255]),
-                        "amber" | "gold" => Rgba([245, 158, 11, 255]),
-                        "amethyst" => Rgba([139, 92, 246, 255]),
-                        _ => Rgba([224, 86, 56, 255]),
-                    };
-                    Self::draw_filled_rect(
-                        &mut img,
-                        12,
-                        12,
-                        CANVAS_WIDTH - 24,
-                        CANVAS_HEIGHT - 24,
-                        Rgba([18, 20, 24, 255]),
-                    );
-                    Self::draw_rect_outline(
-                        &mut img,
-                        12,
-                        12,
-                        CANVAS_WIDTH - 24,
-                        CANVAS_HEIGHT - 24,
-                        Rgba([38, 41, 48, 255]),
-                    );
-                    Self::draw_filled_rect(&mut img, 12, 12, CANVAS_WIDTH - 24, 6, accent);
-                }
-                LayerKind::Avatar {
-                    radius,
-                    frame_color,
-                } => {
-                    let r = ((*radius as f32) * t.scale).clamp(20.0, 90.0) as u32;
-                    let size = r * 2;
-                    let x = tx as u32;
-                    let y = ty as u32;
+        for l in layers.iter().take(MAX_LAYERS) {
+            let tx = l.transform.x.clamp(12, 750) as u32;
+            let ty = l.transform.y.clamp(12, 360) as u32;
 
+            match l.layer_id.as_str() {
+                "avatar" => {
+                    let avatar_size = 110;
                     if let Some(bytes) = avatar_bytes {
-                        if let Ok(src_avatar) = image::load_from_memory(bytes) {
-                            let scaled = src_avatar.thumbnail_exact(size, size).to_rgba8();
-                            Self::draw_circular_image(&mut img, &scaled, x, y, r);
+                        if let Ok(src) = image::load_from_memory(bytes) {
+                            let scaled = src.thumbnail_exact(avatar_size, avatar_size).to_rgba8();
+                            Self::draw_circular_image(&mut img, &scaled, tx, ty, avatar_size / 2);
                         } else {
-                            Self::draw_avatar_placeholder(&mut img, x, y, r);
+                            Self::draw_avatar_placeholder(&mut img, tx, ty, avatar_size / 2);
                         }
                     } else {
-                        Self::draw_avatar_placeholder(&mut img, x, y, r);
+                        Self::draw_avatar_placeholder(&mut img, tx, ty, avatar_size / 2);
                     }
-                    Self::draw_circle_outline(&mut img, x + r, y + r, r + 2, Rgba(*frame_color));
+                    Self::draw_circle_outline(
+                        &mut img,
+                        tx + 55,
+                        ty + 55,
+                        57,
+                        Rgba([245, 158, 11, 255]),
+                    );
                 }
-                LayerKind::Username { font_scale, color } => {
+                "username" => {
                     let clean = if username.len() > 18 {
                         &username[..18]
                     } else {
                         username
                     };
-                    let s = ((*font_scale as f32) * t.scale).clamp(1.0, 5.0) as u32;
-                    // Draw drop shadow for 100% legibility
-                    Self::draw_text(
+                    Self::draw_text(&mut img, tx + 2, ty + 2, clean, 3, Rgba([0, 0, 0, 220]));
+                    Self::draw_text(&mut img, tx, ty, clean, 3, Rgba([243, 244, 246, 255]));
+                }
+                "badges" => {
+                    let lvl_str = format!("LVL {}", level);
+                    let pts_str = format!("PTS: {}", points);
+                    let lvl_w = Self::draw_badge(&mut img, tx, ty, &lvl_str, accent);
+                    Self::draw_badge(
                         &mut img,
-                        (tx + 2) as u32,
-                        (ty + 2) as u32,
-                        clean,
-                        s,
-                        Rgba([0, 0, 0, 220]),
+                        tx + lvl_w + 14,
+                        ty,
+                        &pts_str,
+                        Rgba([16, 185, 129, 255]),
                     );
-                    Self::draw_text(&mut img, tx as u32, ty as u32, clean, s, Rgba(*color));
                 }
-                LayerKind::Badge { text, bg_color } => {
-                    let label = if text == "LVL" {
-                        format!("LVL {}", level)
-                    } else if text == "PTS" {
-                        format!("PTS: {}", points)
-                    } else {
-                        text.clone()
-                    };
-                    Self::draw_badge(&mut img, tx as u32, ty as u32, &label, Rgba(*bg_color));
-                }
-                LayerKind::StatChip {
-                    label,
-                    value: _,
-                    accent,
-                } => {
-                    let val = match label.as_str() {
-                        "CONTINENT" => continent,
-                        "COUNTRY" => country,
-                        "AGE" => age_display,
-                        _ => "Unset",
-                    };
-                    let w = ((220.0 * t.scale) as u32).clamp(140, 300);
-                    let h = ((65.0 * t.scale) as u32).clamp(40, 90);
+                "chip_continent" => {
                     Self::draw_stat_chip(
                         &mut img,
-                        tx as u32,
-                        ty as u32,
-                        w,
-                        h,
-                        label,
-                        val,
-                        Rgba(*accent),
+                        tx,
+                        ty,
+                        220,
+                        65,
+                        "CONTINENT",
+                        continent,
+                        Rgba([99, 102, 241, 255]),
                     );
                 }
-                LayerKind::XpBar {
-                    width,
-                    height,
-                    accent,
-                } => {
-                    let w = ((*width as f32) * t.scale).clamp(200.0, 750.0) as u32;
-                    let h = ((*height as f32) * t.scale).clamp(12.0, 40.0) as u32;
-                    Self::draw_xp_bar(
+                "chip_country" => {
+                    Self::draw_stat_chip(
                         &mut img,
-                        tx as u32,
-                        ty as u32,
-                        w,
-                        h,
-                        level,
-                        xp,
-                        Rgba(*accent),
+                        tx,
+                        ty,
+                        220,
+                        65,
+                        "COUNTRY",
+                        country,
+                        Rgba([236, 72, 153, 255]),
                     );
                 }
+                "chip_age" => {
+                    Self::draw_stat_chip(&mut img, tx, ty, 220, 65, "AGE", age_display, accent);
+                }
+                "xp_bar" => {
+                    Self::draw_xp_bar(&mut img, tx, ty, 710, 24, level, xp, accent);
+                }
+                _ => {}
             }
         }
 
@@ -421,8 +280,7 @@ impl CanvasCompositor {
         let progress = if delta == 0 {
             1.0
         } else {
-            let u_delta = xp.saturating_sub(cur_xp);
-            (u_delta as f32 / delta as f32).clamp(0.0, 1.0)
+            (xp.saturating_sub(cur_xp) as f32 / delta as f32).clamp(0.0, 1.0)
         };
 
         let label = format!("XP: {} / {} ({:.1}%)", xp, next_xp, progress * 100.0);

@@ -1086,7 +1086,7 @@ async fn cmd_profile(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) 
         }
     }
 
-    // 1. RENDER MODULAR 2D SCENE GRAPH CANVAS (MESSAGE 1)
+    // 1. RENDER 1:1 REAL SHOWCASE CARD (MESSAGE 1)
     let card_png = crate::canvas::CanvasCompositor::render_scene(
         &scene,
         &target_name,
@@ -1107,7 +1107,7 @@ async fn cmd_profile(ctx: &Context, c: &BotContainer, cmd: &CommandInteraction) 
         )
         .await;
 
-    // 2. DISPATCH COMPANION RAW MARKDOWN BIO (MESSAGE 2 - ZERO BOT BRANDING)
+    // 2. DISPATCH COMPANION RAW MARKDOWN BIO (MESSAGE 2 - PURE NATIVE MARKDOWN)
     let clean_bio = bio.trim();
     if !clean_bio.is_empty() {
         let _ = cmd
